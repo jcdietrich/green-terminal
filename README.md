@@ -16,13 +16,20 @@ Bayer-dithered vignette, ghost afterimage, blinking cursor with fade
 trail). Hold and clear-pause durations are shortened so the loops
 stay punchy.
 
-| Scenario | Demo |
-| -------- | ---- |
-| Short message: types out, holds, clears with a ghost afterimage, returns to a blinking home cursor. | <video src="docs/img/basic.mp4" controls muted loop playsinline></video> |
-| Long message: wraps at 26 columns and scrolls inside the 9-row visible window. | <video src="docs/img/long.mp4" controls muted loop playsinline></video> |
-| Amber alert: same flow, alert colour, `:x:` glyph expanded server-side. | <video src="docs/img/alert.mp4" controls muted loop playsinline></video> |
-| Sticky alert: footer shows `- 1/1 -` and the message re-types itself indefinitely until cleared. | <video src="docs/img/sticky.mp4" controls muted loop playsinline></video> |
-| Idle matrix rain: hex glyphs fall in per-column streams with bright heads and fading tails; a message arrives, plays out, then rain resumes. | <video src="docs/img/rain.mp4" controls muted loop playsinline></video> |
+**Short message** — types out, holds, clears with a ghost afterimage, returns to a blinking home cursor.<br>
+<video src="docs/img/basic.mp4" controls muted loop playsinline></video>
+
+**Long message** — wraps at 26 columns and scrolls inside the 9-row visible window.<br>
+<video src="docs/img/long.mp4" controls muted loop playsinline></video>
+
+**Amber alert** — same flow, alert colour, `:x:` glyph expanded server-side.<br>
+<video src="docs/img/alert.mp4" controls muted loop playsinline></video>
+
+**Sticky alert** — footer shows `- 1/1 -` and the message re-types itself indefinitely until cleared.<br>
+<video src="docs/img/sticky.mp4" controls muted loop playsinline></video>
+
+**Idle matrix rain** — hex glyphs fall in per-column streams with bright heads and fading tails; a message arrives, plays out, then rain resumes.<br>
+<video src="docs/img/rain.mp4" controls muted loop playsinline></video>
 
 > Render or re-render locally with `python tools/sim.py --all`. Requires
 > `Pillow`, `numpy`, and `ffmpeg` on PATH.
