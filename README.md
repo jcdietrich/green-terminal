@@ -7,6 +7,26 @@ should, scrolls when the screen fills, lingers for a beat, fades to
 black, and moves on to the next thing in the queue. When the queue is
 empty the screen falls back to a Matrix-style rain of hex glyphs.
 
+## Showcase
+
+All clips are rendered by [`tools/sim.py`](tools/sim.py), an off-device
+simulator that mirrors the firmware's display pipeline exactly
+(background phosphor wash, 4-direction bloom, scanline stipple,
+Bayer-dithered vignette, ghost afterimage, blinking cursor with fade
+trail). Hold and clear-pause durations are shortened so the loops
+stay punchy.
+
+| Scenario | Demo |
+| -------- | ---- |
+| Short message: types out, holds, clears with a ghost afterimage, returns to a blinking home cursor. | <video src="docs/img/basic.mp4" controls muted loop playsinline></video> |
+| Long message: wraps at 26 columns and scrolls inside the 9-row visible window. | <video src="docs/img/long.mp4" controls muted loop playsinline></video> |
+| Amber alert: same flow, alert colour, `:x:` glyph expanded server-side. | <video src="docs/img/alert.mp4" controls muted loop playsinline></video> |
+| Sticky alert: footer shows `- 1/1 -` and the message re-types itself indefinitely until cleared. | <video src="docs/img/sticky.mp4" controls muted loop playsinline></video> |
+| Idle matrix rain: hex glyphs fall in per-column streams with bright heads and fading tails; a message arrives, plays out, then rain resumes. | <video src="docs/img/rain.mp4" controls muted loop playsinline></video> |
+
+> Render or re-render locally with `python tools/sim.py --all`. Requires
+> `Pillow`, `numpy`, and `ffmpeg` on PATH.
+
 ## Hardware
 
 - **Board:** Waveshare ESP32-S3-Touch-LCD-2 (2.0" IPS 240×320, ST7789T3
