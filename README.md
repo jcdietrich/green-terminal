@@ -17,19 +17,19 @@ trail). Hold and clear-pause durations are shortened so the loops
 stay punchy.
 
 **Short message** — types out, holds, clears with a ghost afterimage, returns to a blinking home cursor.<br>
-<video src="docs/img/basic.mp4" controls muted loop playsinline></video>
+![basic demo](docs/img/basic.gif) &nbsp;·&nbsp; [MP4](docs/img/basic.mp4)
 
 **Long message** — wraps at 26 columns and scrolls inside the 9-row visible window.<br>
-<video src="docs/img/long.mp4" controls muted loop playsinline></video>
+![long demo](docs/img/long.gif) &nbsp;·&nbsp; [MP4](docs/img/long.mp4)
 
 **Amber alert** — same flow, alert colour, `:x:` glyph expanded server-side.<br>
-<video src="docs/img/alert.mp4" controls muted loop playsinline></video>
+![alert demo](docs/img/alert.gif) &nbsp;·&nbsp; [MP4](docs/img/alert.mp4)
 
 **Sticky alert** — footer shows `- 1/1 -` and the message re-types itself indefinitely until cleared.<br>
-<video src="docs/img/sticky.mp4" controls muted loop playsinline></video>
+![sticky demo](docs/img/sticky.gif) &nbsp;·&nbsp; [MP4](docs/img/sticky.mp4)
 
 **Idle matrix rain** — hex glyphs fall in per-column streams with bright heads and fading tails; a message arrives, plays out, then rain resumes.<br>
-<video src="docs/img/rain.mp4" controls muted loop playsinline></video>
+![rain demo](docs/img/rain.gif) &nbsp;·&nbsp; [MP4](docs/img/rain.mp4)
 
 > Render or re-render locally with `python tools/sim.py --all`. Requires
 > `Pillow`, `numpy`, and `ffmpeg` on PATH.
