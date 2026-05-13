@@ -1,0 +1,1523 @@
+## green-terminal.yaml
+## Waveshare ESP32-S3-Touch-LCD-2 (2.0" IPS 240x320, ST7789T3 + CST816D)
+## Typewriter "green CRT" terminal with cyclic message queue.
+##
+## Ingress:
+##   - Native API service: add_message(text: string)
+##   - MQTT topic       : green-terminal/enqueue   (payload = message text)
+##
+## Behaviour per message: type out at ~50 ms/char, scroll lines as needed,
+## hold 10 s (cursor blinks at end), clear, hold 3 s (cursor blinks at home),
+## advance. Queue caps at 20 (oldest evicted on overflow). Footer = "x/N".
+
+substitutions:
+  device_name: green-terminal
+  friendly_name: "Green Terminal"
+  # All other constants are now HA-tunable number entities (see `number:` block).
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  includes:
+    - includes/queue_storage.h
+  on_boot:
+    priority: -100
+    then:
+      - script.execute: load_queue
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_PM_ENABLE: y        # required for esp_pm_configure runtime clock-scaling
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: HIGH   # Wi-Fi modem idles between beacons; ~30-40% radio savings
+  ap:
+    ssid: "${friendly_name} Fallback"
+
+api:
+  encryption:
+    key: !secret api_key
+  actions:
+    - action: add_message
+      variables:
+        message: string
+      then:
+        - script.execute:
+            id: enqueue_message
+            msg: !lambda 'return message;'
+            is_alert: false
+            is_sticky: false
+    - action: add_alert
+      variables:
+        message: string
+      then:
+        - script.execute:
+            id: enqueue_message
+            msg: !lambda 'return message;'
+            is_alert: true
+            is_sticky: false
+    - action: add_sticky_alert
+      variables:
+        message: string
+      then:
+        - script.execute:
+            id: enqueue_message
+            msg: !lambda 'return message;'
+            is_alert: true
+            is_sticky: true
+    - action: clear_queue
+      then:
+        - lambda: |-
+            id(ghost_lines) = id(visible_lines);
+            id(ghost_is_alert) =
+              (id(cur_idx) < (int)id(chunk_alert).size())
+              && id(chunk_alert)[id(cur_idx)] != 0;
+            id(ghost_started_ms) = millis();
+            id(msg_queue).clear();
+            id(chunk_group).clear();
+            id(chunk_alert).clear();
+            id(chunk_sticky).clear();
+            id(visible_lines).clear();
+            id(cur_idx) = 0;
+            id(char_idx) = 0;
+            id(state) = 0;
+            id(state_started_ms) = millis();
+            // Wipe any manual LED state too — clear_queue is a hard reset.
+            id(led_saved_on)         = false;
+            id(led_saved_r)          = 0.0f;
+            id(led_saved_g)          = 0.0f;
+            id(led_saved_b)          = 0.0f;
+            id(led_saved_brightness) = 1.0f;
+            id(led_saved_effect)     = "None";
+            auto led = id(status_leds).turn_off();
+            led.set_transition_length(0);
+            led.perform();
+        - script.execute: save_queue
+    - action: clear_indices
+      variables:
+        indices: string
+      then:
+        - lambda: |-
+            // Parse space/comma-separated 1-based group indices.
+            std::vector<int> idxs;
+            size_t i = 0;
+            while (i < indices.size()) {
+              while (i < indices.size()
+                     && (indices[i] < '0' || indices[i] > '9')) i++;
+              if (i >= indices.size()) break;
+              int n = 0;
+              while (i < indices.size()
+                     && indices[i] >= '0' && indices[i] <= '9') {
+                n = n * 10 + (indices[i] - '0');
+                i++;
+              }
+              if (n > 0) idxs.push_back(n);
+            }
+            // Sort descending + dedupe so removals don't renumber each other.
+            std::sort(idxs.begin(), idxs.end(), std::greater<int>());
+            idxs.erase(std::unique(idxs.begin(), idxs.end()), idxs.end());
+
+            int new_cur = id(cur_idx);
+            int groups_removed = 0;
+            int chunks_removed = 0;
+            for (int gpos : idxs) {
+              int chunk_idx = gt::find_group_start(id(chunk_group), gpos);
+              if (chunk_idx < 0) continue;
+              int n = gt::remove_group_at(id(msg_queue),
+                                          id(chunk_group),
+                                          id(chunk_alert),
+                                          id(chunk_sticky),
+                                          gpos);
+              if (n > 0) {
+                groups_removed++;
+                chunks_removed += n;
+                if (chunk_idx <= new_cur) new_cur -= n;
+              }
+            }
+
+            if (chunks_removed > 0) {
+              id(ghost_lines) = id(visible_lines);
+              id(ghost_is_alert) = false;
+              id(ghost_started_ms) = millis();
+              id(visible_lines).clear();
+              id(char_idx) = 0;
+              id(cur_idx) = std::max(0, new_cur);
+              if (id(msg_queue).empty()
+                  || (size_t)id(cur_idx) >= id(msg_queue).size()) {
+                id(cur_idx) = 0;
+                id(state) = 0;
+              }
+              id(state_started_ms) = millis();
+            }
+            ESP_LOGI("term", "clear_indices: %d/%d groups removed (%d chunks), queue=%d",
+                     groups_removed, (int)idxs.size(),
+                     chunks_removed, (int)id(msg_queue).size());
+        - script.execute: save_queue
+    - action: clear_alerts
+      then:
+        - lambda: |-
+            int removed = gt::clear_alert_chunks(id(msg_queue),
+                                                 id(chunk_group),
+                                                 id(chunk_alert),
+                                                 id(chunk_sticky),
+                                                 id(cur_idx));
+            // If we were typing an alert that just got removed, ghost the
+            // current screen and reset to IDLE so the next tick picks a
+            // fresh starting point cleanly.
+            bool was_alert_active =
+              (id(cur_idx) < (int)id(chunk_alert).size())
+              && id(chunk_alert)[id(cur_idx)] != 0;
+            id(cur_idx) = std::max(0, id(cur_idx) - removed);
+            if (id(cur_idx) >= (int)id(msg_queue).size() || was_alert_active) {
+              id(ghost_lines) = id(visible_lines);
+              id(ghost_is_alert) = true;
+              id(ghost_started_ms) = millis();
+              id(visible_lines).clear();
+              id(cur_idx) = 0;
+              id(char_idx) = 0;
+              id(state) = 0;
+              id(state_started_ms) = millis();
+            }
+            ESP_LOGI("term", "cleared alerts, queue now %d chunks",
+                     (int)id(msg_queue).size());
+        - script.execute: save_queue
+    - action: skip
+      then:
+        - script.execute: force_advance
+    - action: reset_leds
+      then:
+        - lambda: |-
+            // Drop any HA-set baseline so the next alert exit goes to off.
+            id(led_saved_on)         = false;
+            id(led_saved_r)          = 0.0f;
+            id(led_saved_g)          = 0.0f;
+            id(led_saved_b)          = 0.0f;
+            id(led_saved_brightness) = 1.0f;
+            id(led_saved_effect)     = "None";
+            auto call = id(status_leds).turn_off();
+            call.set_transition_length(0);
+            call.perform();
+    - action: dump_state
+      then:
+        - lambda: |-
+            std::string json = gt::serialize_state(
+              id(msg_queue), id(chunk_group), id(chunk_alert),
+              id(chunk_sticky), id(next_group_id));
+            // Bracket the payload so the receiver can reassemble even if
+            // ESPHome's log buffer chunks it into multiple lines.
+            ESP_LOGI("term:state", "<<<DUMP %d>>>", (int)json.size());
+            // Emit in 200-char slices to stay below logger.tx_buffer_size.
+            for (size_t pos = 0; pos < json.size(); pos += 200) {
+              std::string slice = json.substr(pos, 200);
+              ESP_LOGI("term:state", "%s", slice.c_str());
+            }
+            ESP_LOGI("term:state", "<<<END>>>");
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  discovery: false
+  reboot_timeout: 0s        # don't reboot if broker is unreachable; API still works
+  on_message:
+    - topic: green-terminal/enqueue
+      then:
+        - script.execute:
+            id: enqueue_message
+            msg: !lambda 'return x;'
+            is_alert: false
+            is_sticky: false
+    - topic: green-terminal/alert
+      then:
+        - script.execute:
+            id: enqueue_message
+            msg: !lambda 'return x;'
+            is_alert: true
+            is_sticky: false
+    - topic: green-terminal/sticky-alert
+      then:
+        - script.execute:
+            id: enqueue_message
+            msg: !lambda 'return x;'
+            is_alert: true
+            is_sticky: true
+
+spi:
+  - id: spi_lcd
+    clk_pin: GPIO39
+    mosi_pin: GPIO38
+    interface: spi3
+
+output:
+  - platform: ledc
+    pin: GPIO1
+    id: lcd_backlight_pwm
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    output: lcd_backlight_pwm
+    name: "Backlight"
+    id: backlight
+    restore_mode: ALWAYS_ON
+    default_transition_length: 0s
+  - platform: esp32_rmt_led_strip
+    name: "Status LEDs"
+    id: status_leds
+    pin: GPIO16
+    num_leds: 3
+    chipset: WS2812        # ESPHome treats WS2812 and WS2812B as the same chipset
+    rgb_order: GRB
+    restore_mode: ALWAYS_OFF
+    default_transition_length: 100ms
+    effects:
+      - pulse:
+          name: pulse
+          transition_length: 1000ms
+          update_interval: 1000ms
+          min_brightness: 25%
+          max_brightness: 100%
+      - addressable_scan:
+          name: scan
+          move_interval: 240ms
+          scan_width: 1
+      - addressable_flicker:
+          name: flicker
+          update_interval: 16ms
+          intensity: 80%
+
+color:
+  - id: color_green
+    red: 0%
+    green: 100%
+    blue: 0%
+  - id: color_black
+    red: 0%
+    green: 0%
+    blue: 0%
+
+font:
+  # RobotoMono Nerd Font, Mono variant. The Mono variant strips most
+  # standard Unicode symbol blocks (no arrows, almost no Misc Symbols)
+  # but keeps 10,000+ Nerd Font icons all constrained to one cell width.
+  # Find icons + copy-paste glyphs at https://www.nerdfonts.com/cheat-sheet
+  # — paste any character below into `glyphs:` to enable it.
+  #
+  # Available from the base mono font: ASCII, Latin-1, full box-drawing,
+  # block-elements (░▒▓█▀▄▌▐), ♥ ⚡ ☰, dingbat brackets ❬❭❮❯❰❱, Greek,
+  # Cyrillic, math operators (∂∆∏∑√∞∫).
+  - file: "fonts/RobotoMonoNerdFontMono-Bold.ttf"
+    id: terminal_font
+    size: 18
+    glyphs: "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~ ♥⚡☰░▒▓█▀▄▌▐─│┌┐└┘├┤┬┴┼–—‘’“”…•·©®™"
+    extras:
+      - file: "fonts/RobotoMonoNerdFontMono-Bold.ttf"
+        glyphs: ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
+        #  ↑ FA: warning  check  times  star  heart  cog  home  bell
+        #       bolt  info-o  question-o  envelope  clock  user  music
+  - file: "fonts/RobotoMonoNerdFontMono-Bold.ttf"
+    id: footer_font
+    size: 12
+
+display:
+  - platform: ili9xxx
+    model: ST7789V
+    id: term_display
+    spi_id: spi_lcd
+    cs_pin: GPIO45
+    dc_pin: GPIO42
+    reset_pin: GPIO0
+    dimensions:
+      width: 240
+      height: 320
+    rotation: 90
+    invert_colors: true
+    color_order: bgr
+    data_rate: 80MHz       # halves the per-frame SPI flush time
+    update_interval: 16ms  # ~60fps target (driver may fall behind on heavy frames)
+    lambda: |-
+      // Low-power idle: queue empty + Sleep-when-idle switch on → fully
+      // black framebuffer, no rain, no scanlines. The 5 ms interval drops
+      // the backlight too, so the panel is dark and quiet.
+      if (id(sleep_when_idle_cfg).state && id(msg_queue).empty()) {
+        it.fill(Color(0, 0, 0));
+        return;
+      }
+
+      auto green = Color((uint8_t)id(text_r_cfg).state,
+                         (uint8_t)id(text_g_cfg).state,
+                         (uint8_t)id(text_b_cfg).state);
+      auto black = Color(0, 0, 0);
+      auto alert_full = Color((uint8_t)id(alert_r_cfg).state,
+                              (uint8_t)id(alert_g_cfg).state,
+                              (uint8_t)id(alert_b_cfg).state);
+
+      const int line_h = (int)id(line_height_cfg).state;
+      const int glyph_w = (int)id(glyph_width_cfg).state;
+      const int mg = (int)id(margin_cfg).state;
+      const uint32_t ghost_duration_ms = (uint32_t)id(ghost_duration_ms_cfg).state;
+      const uint8_t ghost_green = (uint8_t)id(ghost_green_cfg).state;
+      const int scanline_period = (int)id(scanline_period_cfg).state;
+      const int bg_glow = (int)id(bg_glow_cfg).state;
+      const int bloom_intensity = (int)id(bloom_intensity_cfg).state;
+      const int vignette_strength = (int)id(vignette_strength_cfg).state;
+
+      // Foreground colour for currently-typing message (alert vs normal).
+      bool cur_is_alert =
+        (id(cur_idx) < (int)id(chunk_alert).size())
+        && id(chunk_alert)[id(cur_idx)] != 0;
+      auto fg = cur_is_alert ? alert_full : green;
+
+      // Background: a faint version of fg ("phosphor wash"). bg_glow=0 → pure black.
+      // Use fill() (driver-level fast path).
+      auto bg = Color((uint8_t)((int)fg.r * bg_glow / 255),
+                      (uint8_t)((int)fg.g * bg_glow / 255),
+                      (uint8_t)((int)fg.b * bg_glow / 255));
+      it.fill(bg);
+
+      uint32_t now = millis();
+
+      // Helper: render one line, splitting on *...* blink segments.
+      // `blink_alpha` is 0..1 — full brightness at 1, scaled (and possibly
+      // hidden) below. Used for the cursor-rate blink and its fade-out trail.
+      // Returns the x-coord where rendering ended (used for cursor placement).
+      auto draw_line = [&](int x0, int y, const std::string &line,
+                           Color col, float blink_alpha) -> int {
+        int x = x0;
+        auto segs = gt::parse_blink_segments(line);
+        for (auto &seg : segs) {
+          if (seg.text.empty()) continue;
+          int x1 = 0, y1 = 0, w = 0, h = 0;
+          it.get_text_bounds(x, y, seg.text.c_str(), id(terminal_font),
+                             TextAlign::TOP_LEFT, &x1, &y1, &w, &h);
+          if (!seg.blink) {
+            it.print(x, y, id(terminal_font), col, seg.text.c_str());
+          } else if (blink_alpha > 0.01f) {
+            Color faded((uint8_t)(col.r * blink_alpha),
+                        (uint8_t)(col.g * blink_alpha),
+                        (uint8_t)(col.b * blink_alpha));
+            it.print(x, y, id(terminal_font), faded, seg.text.c_str());
+          }
+          x += w;
+        }
+        return x;
+      };
+
+      // Cursor-rate blink with a ~300 ms ghost trail. cycle is 1000 ms:
+      // 0..500 = ON (solid), 500..800 = fading out, 800..1000 = OFF.
+      float blink_alpha;
+      {
+        uint32_t cycle_pos = now % 1000;
+        if (cycle_pos < 500) {
+          blink_alpha = 1.0f;
+        } else if (cycle_pos < 800) {
+          blink_alpha = 1.0f - (float)(cycle_pos - 500) / 300.0f;
+        } else {
+          blink_alpha = 0.0f;
+        }
+      }
+
+      // Phosphor ghost — draws first so bright text overwrites where it can.
+      uint32_t ghost_age = now - id(ghost_started_ms);
+      if (!id(ghost_lines).empty() && ghost_age < ghost_duration_ms
+          && ghost_duration_ms > 0) {
+        float t = 1.0f - (float)ghost_age / (float)ghost_duration_ms;
+        if (t < 0.0f) t = 0.0f;
+        Color ghost_col;
+        float scale = t * (float)ghost_green / 255.0f;
+        if (id(ghost_is_alert)) {
+          ghost_col = Color((uint8_t)((float)id(alert_r_cfg).state * scale),
+                            (uint8_t)((float)id(alert_g_cfg).state * scale),
+                            (uint8_t)((float)id(alert_b_cfg).state * scale));
+        } else {
+          ghost_col = Color((uint8_t)((float)id(text_r_cfg).state * scale),
+                            (uint8_t)((float)id(text_g_cfg).state * scale),
+                            (uint8_t)((float)id(text_b_cfg).state * scale));
+        }
+        int gn = (int)id(ghost_lines).size();
+        // Ghost always shows blink-segment contents (snapshot in time).
+        for (int i = 0; i < gn; i++) {
+          draw_line(mg, mg + i * line_h, id(ghost_lines)[i], ghost_col, 1.0f);
+        }
+      } else if (!id(ghost_lines).empty()) {
+        id(ghost_lines).clear();
+      }
+
+      // Bloom — render dim copies shifted by 1 px in the 4 cardinal directions
+      // so the bright text below sits inside a soft halo. Suppressed while
+      // the ghost is still visible, because the bloom + ghost ordering causes
+      // a brightness flicker as the ghost fades through the bloom layer.
+      int n = (int)id(visible_lines).size();
+      bool ghost_active = !id(ghost_lines).empty()
+                          && ghost_age < ghost_duration_ms
+                          && ghost_duration_ms > 0;
+      if (bloom_intensity > 0 && n > 0 && !ghost_active) {
+        Color bloom_col((uint8_t)((int)fg.r * bloom_intensity / 100),
+                        (uint8_t)((int)fg.g * bloom_intensity / 100),
+                        (uint8_t)((int)fg.b * bloom_intensity / 100));
+        const int dxs[4] = {1, -1, 0, 0};
+        const int dys[4] = {0, 0, 1, -1};
+        for (int k = 0; k < 4; k++) {
+          for (int i = 0; i < n; i++) {
+            draw_line(mg + dxs[k], mg + dys[k] + i * line_h,
+                      id(visible_lines)[i], bloom_col, blink_alpha);
+          }
+        }
+      }
+
+      // Scrollback (bright in current foreground colour, with *...* blinking).
+      int last_line_end_x = mg;
+      for (int i = 0; i < n; i++) {
+        int end_x = draw_line(mg, mg + i * line_h, id(visible_lines)[i],
+                              fg, blink_alpha);
+        if (i == n - 1) last_line_end_x = end_x;
+      }
+
+      // Cursor position — use the font's actual glyph metrics so the block
+      // sits exactly after the last rendered char. Walks parsed segments so
+      // *blink* asterisks aren't counted in the cursor offset.
+      auto cursor_xy = [&](int &out_x, int &out_y) {
+        int row = std::max(0, (int)id(visible_lines).size() - 1);
+        out_y = mg + row * line_h;
+        out_x = last_line_end_x;
+      };
+
+      int st = id(state);
+      bool is_idle = (st == 0) && id(msg_queue).empty();
+
+      if (is_idle) {
+        // Matrix-rain idle screen. Per-column stable random streams of hex
+        // glyphs falling with a bright head and a fading tail.
+        static const char matrix_pool[] = "0123456789ABCDEF";
+        const int pool_size = 16;
+        int n_cols = (it.get_width() - 2 * mg) / glyph_w;
+        int n_rows = (it.get_height() - mg) / line_h;
+        float rain_speed_factor = (float)id(rain_speed_cfg).state / 100.0f;
+        int rain_density = (int)id(rain_density_cfg).state;
+        int col_step = std::max(1, 100 / std::max(1, rain_density));
+        for (int col = 0; col < n_cols; col += col_step) {
+          uint32_t seed = (uint32_t)col * 73u + 11u;
+          float speed_rps = (1.5f + (float)(seed % 5u) * 0.5f)
+                            * rain_speed_factor;
+          uint32_t phase_ms = (seed * 257u) % 6000u;
+          int trail_len = 4 + (int)(seed % 4u);                 // 4..7
+          float head_row_f =
+            ((float)(now + phase_ms) / 1000.0f) * speed_rps;
+          float cycle_len = (float)(n_rows + trail_len + 4);
+          head_row_f = fmodf(head_row_f, cycle_len);
+          int head_row = (int)head_row_f;
+
+          for (int t = 0; t < trail_len; t++) {
+            int row = head_row - t;
+            if (row < 0 || row >= n_rows) continue;
+            uint32_t shift = (now / 250u) + (uint32_t)col * 37u
+                             + (uint32_t)row * 71u;
+            char c = matrix_pool[shift % pool_size];
+            char s[2] = {c, 0};
+            Color stream_col;
+            if (t == 0) {
+              stream_col = Color(
+                (uint8_t)std::min<int>(255, (int)fg.r + 120),
+                (uint8_t)std::min<int>(255, (int)fg.g + 60),
+                (uint8_t)std::min<int>(255, (int)fg.b + 120));
+            } else {
+              float fade = 1.0f - (float)t / (float)trail_len;
+              stream_col = Color(
+                (uint8_t)((int)fg.r * fade),
+                (uint8_t)((int)fg.g * fade),
+                (uint8_t)((int)fg.b * fade));
+            }
+            it.print(mg + col * glyph_w, mg + row * line_h,
+                     id(terminal_font), stream_col, s);
+          }
+        }
+      } else {
+        bool draw_cursor = false;
+        float cursor_alpha = 1.0f;          // TYPING: solid full-bright
+        int cx = mg, cy = mg;
+        if (st == 1) {
+          draw_cursor = true;
+          cursor_xy(cx, cy);
+        } else if (st == 2) {               // PAUSE_AFTER: blink at end of text
+          draw_cursor = true;
+          cursor_alpha = blink_alpha;
+          cursor_xy(cx, cy);
+        } else if (st == 3) {               // CLEAR_PAUSE: home blink
+          draw_cursor = true;
+          cursor_alpha = blink_alpha;
+          cx = mg;
+          cy = mg;
+        }
+        if (draw_cursor && cursor_alpha > 0.01f) {
+          Color cur_col((uint8_t)(fg.r * cursor_alpha),
+                        (uint8_t)(fg.g * cursor_alpha),
+                        (uint8_t)(fg.b * cursor_alpha));
+          it.filled_rectangle(cx, cy, glyph_w, line_h, cur_col);
+        }
+      }
+
+      // Footer x/N bottom-centre — centred so the vignette can't eat it.
+      // Sticky messages get dashes around the count: - x/N -.
+      if (!id(msg_queue).empty()) {
+        int total_groups = gt::group_count(id(chunk_group));
+        int cur_group = gt::group_position(id(chunk_group), id(cur_idx));
+        bool cur_sticky =
+          (id(cur_idx) < (int)id(chunk_sticky).size())
+          && id(chunk_sticky)[id(cur_idx)] != 0;
+        const char *fmt = cur_sticky ? "- %d/%d -" : "%d/%d";
+        it.printf(it.get_width() / 2, it.get_height() - mg,
+                  id(footer_font), fg, TextAlign::BASELINE_CENTER,
+                  fmt, cur_group, total_groups);
+      }
+
+      // Subtle CRT scan lines — stippled (every other pixel) so the row
+      // appears at ~50% opacity instead of a solid black gap.
+      if (scanline_period > 0) {
+        int W = it.get_width();
+        int H = it.get_height();
+        for (int y = 1; y < H; y += scanline_period) {
+          for (int x = (y & 1); x < W; x += 2) {
+            it.draw_pixel_at(x, y, black);
+          }
+        }
+      }
+
+      // Vignette — dithered fade-to-black toward the corners. Uses a 4×4
+      // Bayer matrix so pixels go progressively black with distance from
+      // centre, approximating an alpha fade without the framebuffer ever
+      // being read back.
+      if (vignette_strength > 0) {
+        int W = it.get_width();
+        int H = it.get_height();
+        int vcx = W / 2;
+        int vcy = H / 2;
+        int maxR2 = vcx * vcx + vcy * vcy;
+        int inner_sq = (maxR2 * (100 - vignette_strength)) / 100;
+        static const uint8_t bayer4[16] = {
+           0,  8,  2, 10,
+          12,  4, 14,  6,
+           3, 11,  1,  9,
+          15,  7, 13,  5,
+        };
+        for (int y = 0; y < H; y++) {
+          int dy = y - vcy;
+          int dy2 = dy * dy;
+          for (int x = 0; x < W; x++) {
+            int dx = x - vcx;
+            int r2 = dx * dx + dy2;
+            if (r2 <= inner_sq) continue;
+            int fade_factor = (r2 >= maxR2)
+              ? 16
+              : ((r2 - inner_sq) * 16) / (maxR2 - inner_sq);
+            uint8_t t = bayer4[((y & 3) << 2) | (x & 3)];
+            if (fade_factor > t) it.draw_pixel_at(x, y, black);
+          }
+        }
+      }
+
+
+i2c:
+  - id: i2c_touch
+    sda: GPIO48
+    scl: GPIO47
+    scan: false
+    frequency: 400kHz
+
+switch:
+  - platform: template
+    name: "Sleep when idle"
+    id: sleep_when_idle_cfg
+    entity_category: config
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    icon: "mdi:monitor-off"
+
+touchscreen:
+  - platform: cst816
+    id: my_touchscreen
+    i2c_id: i2c_touch
+    interrupt_pin: GPIO46
+    on_touch:
+      then:
+        - script.execute: force_advance
+
+number:
+  - platform: template
+    name: "Typewriter speed"
+    id: typewriter_cps_cfg
+    entity_category: config
+    min_value: 1
+    max_value: 200
+    step: 1
+    initial_value: 20        # 20 chars/sec ≈ the original 50 ms/char feel
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "char/s"
+    icon: "mdi:typewriter"
+
+  - platform: template
+    name: "Message hold time"
+    id: pause_after_ms_cfg
+    entity_category: config
+    min_value: 500
+    max_value: 60000
+    step: 500
+    initial_value: 10000
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "ms"
+    icon: "mdi:timer-pause-outline"
+
+  - platform: template
+    name: "Clear pause"
+    id: clear_pause_ms_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 30000
+    step: 100
+    initial_value: 3000
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "ms"
+    icon: "mdi:timer-sand"
+
+  - platform: template
+    name: "Queue capacity"
+    id: queue_cap_cfg
+    entity_category: config
+    min_value: 1
+    max_value: 50
+    step: 1
+    initial_value: 20
+    restore_value: yes
+    optimistic: true
+    mode: box
+    icon: "mdi:format-list-numbered"
+
+  - platform: template
+    name: "Split threshold"
+    id: split_threshold_cfg
+    entity_category: config
+    min_value: 50
+    max_value: 1000
+    step: 10
+    initial_value: 200
+    restore_value: yes
+    optimistic: true
+    mode: box
+    unit_of_measurement: "chars"
+    icon: "mdi:content-cut"
+
+  - platform: template
+    name: "Max input length"
+    id: input_cap_cfg
+    entity_category: config
+    min_value: 100
+    max_value: 8192
+    step: 100
+    initial_value: 4096
+    restore_value: yes
+    optimistic: true
+    mode: box
+    unit_of_measurement: "chars"
+    icon: "mdi:counter"
+
+  - platform: template
+    name: "Max stored chunk"
+    id: char_cap_cfg
+    entity_category: config
+    min_value: 64
+    max_value: 2048
+    step: 32
+    initial_value: 512
+    restore_value: yes
+    optimistic: true
+    mode: box
+    unit_of_measurement: "chars"
+    icon: "mdi:counter"
+
+  - platform: template
+    name: "Visible columns"
+    id: max_cols_cfg
+    entity_category: config
+    min_value: 10
+    max_value: 40
+    step: 1
+    initial_value: 26
+    restore_value: yes
+    optimistic: true
+    mode: box
+    icon: "mdi:arrow-expand-horizontal"
+
+  - platform: template
+    name: "Visible rows"
+    id: max_rows_cfg
+    entity_category: config
+    min_value: 3
+    max_value: 14
+    step: 1
+    initial_value: 9
+    restore_value: yes
+    optimistic: true
+    mode: box
+    icon: "mdi:arrow-expand-vertical"
+
+  - platform: template
+    name: "Line height"
+    id: line_height_cfg
+    entity_category: config
+    min_value: 12
+    max_value: 40
+    step: 1
+    initial_value: 24
+    restore_value: yes
+    optimistic: true
+    mode: box
+    unit_of_measurement: "px"
+    icon: "mdi:format-line-height"
+
+  - platform: template
+    name: "Glyph width"
+    id: glyph_width_cfg
+    entity_category: config
+    min_value: 6
+    max_value: 24
+    step: 1
+    initial_value: 12
+    restore_value: yes
+    optimistic: true
+    mode: box
+    unit_of_measurement: "px"
+    icon: "mdi:format-letter-spacing"
+
+  - platform: template
+    name: "Margin"
+    id: margin_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 20
+    step: 1
+    initial_value: 4
+    restore_value: yes
+    optimistic: true
+    mode: box
+    unit_of_measurement: "px"
+    icon: "mdi:border-all"
+
+  - platform: template
+    name: "Ghost duration"
+    id: ghost_duration_ms_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 3000
+    step: 50
+    initial_value: 550
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "ms"
+    icon: "mdi:ghost-outline"
+
+  - platform: template
+    name: "Ghost intensity"
+    id: ghost_green_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 5
+    initial_value: 60
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    icon: "mdi:contrast-circle"
+
+  - platform: template
+    name: "Scanline period"
+    id: scanline_period_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 12
+    step: 1
+    initial_value: 4
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "px"
+    icon: "mdi:hubspot"
+
+  - platform: template
+    name: "Alert R"
+    id: alert_r_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 255      # default amber: 255, 176, 0
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    icon: "mdi:invert-colors"
+
+  - platform: template
+    name: "Alert G"
+    id: alert_g_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 176
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    icon: "mdi:invert-colors"
+
+  - platform: template
+    name: "Alert B"
+    id: alert_b_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 0
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    icon: "mdi:invert-colors"
+
+  - platform: template
+    name: "Background glow"
+    id: bg_glow_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 60
+    step: 1
+    initial_value: 10        # ~4% of fg per channel — faint phosphor wash
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "/255"
+    icon: "mdi:gradient-vertical"
+
+  - platform: template
+    name: "Bloom intensity"
+    id: bloom_intensity_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 0          # 0 = off; the halo costs 4× text renders per frame
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "%"
+    icon: "mdi:blur"
+
+  - platform: template
+    name: "Vignette"
+    id: vignette_strength_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 100
+    step: 5
+    initial_value: 0          # 0 = off; >0 = how aggressively corners fade to black
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "%"
+    icon: "mdi:image-filter-vintage"
+
+  - platform: template
+    name: "Text R"
+    id: text_r_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 0          # default green: 0, 242, 0 (~95% of full green)
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    icon: "mdi:invert-colors"
+
+  - platform: template
+    name: "Text G"
+    id: text_g_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 242
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    icon: "mdi:invert-colors"
+
+  - platform: template
+    name: "Text B"
+    id: text_b_cfg
+    entity_category: config
+    min_value: 0
+    max_value: 255
+    step: 1
+    initial_value: 0
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    icon: "mdi:invert-colors"
+
+  - platform: template
+    name: "Rain speed"
+    id: rain_speed_cfg
+    entity_category: config
+    min_value: 10
+    max_value: 300
+    step: 5
+    initial_value: 100        # % of base speed (1.5..3.5 rows/s per column)
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "%"
+    icon: "mdi:weather-pouring"
+
+  - platform: template
+    name: "Rain density"
+    id: rain_density_cfg
+    entity_category: config
+    min_value: 10
+    max_value: 100
+    step: 5
+    initial_value: 100        # % of columns to render (100 = every col, 50 = every other)
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "%"
+    icon: "mdi:dots-grid"
+
+
+
+
+globals:
+  - id: msg_queue
+    type: 'std::vector<std::string>'
+    restore_value: no
+    # Persisted via gt::save_state / gt::load_state in includes/queue_storage.h
+    # — stored as JSON in NVS under "term/state_json".
+  - id: chunk_group         # parallel to msg_queue; 0 = standalone, >0 = group id shared by chunks of one split message
+    type: 'std::vector<int>'
+    restore_value: no
+  - id: chunk_alert         # parallel to msg_queue; 0 = normal, 1 = alert (rendered in alert colour)
+    type: 'std::vector<int>'
+    restore_value: no
+  - id: chunk_sticky        # parallel to msg_queue; 1 = pin PAUSE_AFTER until cleared
+    type: 'std::vector<int>'
+    restore_value: no
+  - id: next_group_id
+    type: int
+    initial_value: '1'
+  - id: visible_lines
+    type: 'std::vector<std::string>'
+    restore_value: no
+  - id: ghost_lines         # CRT-phosphor afterimage of recently-removed/cleared lines
+    type: 'std::vector<std::string>'
+    restore_value: no
+  - id: ghost_is_alert      # whether the ghost text was an alert (renders in alert colour)
+    type: bool
+    initial_value: 'false'
+  - id: ghost_started_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: cur_idx
+    type: int
+    initial_value: '0'
+  - id: char_idx
+    type: int
+    initial_value: '0'
+  - id: state                # 0=IDLE 1=TYPING 2=PAUSE_AFTER 3=CLEAR_PAUSE
+    type: int
+    initial_value: '0'
+  - id: state_started_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: last_char_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: cursor_on
+    type: bool
+    initial_value: 'true'
+  # Snapshot of the HA-set status-LED state taken when an alert begins.
+  # Restored when the alert ends so the manual setting "survives" alerts.
+  # `reset_leds` and `clear_queue` wipe this back to off.
+  - id: led_saved_on
+    type: bool
+    initial_value: 'false'
+  - id: led_saved_r
+    type: float
+    initial_value: '0.0f'
+  - id: led_saved_g
+    type: float
+    initial_value: '0.0f'
+  - id: led_saved_b
+    type: float
+    initial_value: '0.0f'
+  - id: led_saved_brightness
+    type: float
+    initial_value: '1.0f'
+  - id: led_saved_effect
+    type: std::string
+    initial_value: '"None"'
+
+script:
+  - id: enqueue_message
+    mode: single
+    parameters:
+      msg: string
+      is_alert: bool
+      is_sticky: bool
+    then:
+      - lambda: |-
+          if (msg.empty()) return;
+          const int input_cap = (int)id(input_cap_cfg).state;
+          const int char_cap = (int)id(char_cap_cfg).state;
+          const int split_thr = (int)id(split_threshold_cfg).state;
+          const int queue_cap = (int)id(queue_cap_cfg).state;
+
+          // Expand `:name:` shortcuts (e.g. :heart: → ♥, :warning: → ) before
+          // any size enforcement or splitting.
+          std::string expanded = gt::apply_emoji_shortcuts(msg);
+          std::string m = expanded.substr(0, input_cap);
+          while (!m.empty() &&
+                 (m.back() == ' ' || m.back() == '\n' || m.back() == '\r')) {
+            m.pop_back();
+          }
+          if (m.empty()) return;
+
+          std::vector<std::string> chunks;
+          auto add_chunk = [&](std::string s) {
+            size_t a = 0;
+            while (a < s.size() &&
+                   (s[a] == ' ' || s[a] == '\n' || s[a] == '\r')) a++;
+            size_t b = s.size();
+            while (b > a &&
+                   (s[b-1] == ' ' || s[b-1] == '\n' || s[b-1] == '\r')) b--;
+            if (b <= a) return;
+            s = s.substr(a, b - a);
+            if ((int)s.size() > char_cap) s.resize(char_cap);
+            chunks.push_back(s);
+          };
+
+          if ((int)m.size() <= split_thr) {
+            add_chunk(m);
+          } else {
+            size_t start = 0;
+            while (start < m.size()) {
+              size_t end = std::min(start + (size_t)split_thr, m.size());
+              if (end < m.size()) {
+                size_t nl = m.rfind('\n', end);
+                if (nl != std::string::npos && nl > start) {
+                  end = nl;
+                } else {
+                  size_t spc = m.rfind(' ', end);
+                  if (spc != std::string::npos && spc > start) end = spc;
+                }
+              }
+              add_chunk(m.substr(start, end - start));
+              start = end;
+              while (start < m.size() &&
+                     (m[start] == ' ' || m[start] == '\n' || m[start] == '\r')) {
+                start++;
+              }
+            }
+          }
+          if (chunks.empty()) return;
+
+          int gid = (chunks.size() == 1) ? 0 : id(next_group_id);
+          if (chunks.size() > 1) id(next_group_id) = id(next_group_id) + 1;
+          int alert_flag = is_alert ? 1 : 0;
+          int sticky_flag = is_sticky ? 1 : 0;
+
+          for (auto &c : chunks) {
+            id(msg_queue).push_back(c);
+            id(chunk_group).push_back(gid);
+            id(chunk_alert).push_back(alert_flag);
+            id(chunk_sticky).push_back(sticky_flag);
+          }
+
+          while ((int)id(msg_queue).size() > queue_cap) {
+            int head_g = id(chunk_group).front();
+            if (head_g == gid && gid != 0) break;
+            int n = gt::evict_oldest_group(id(msg_queue), id(chunk_group),
+                                           id(chunk_alert), id(chunk_sticky));
+            if (n == 0) break;
+            id(cur_idx) = std::max(0, id(cur_idx) - n);
+            if (id(cur_idx) >= (int)id(msg_queue).size()) {
+              id(cur_idx) = 0;
+              id(char_idx) = 0;
+              id(visible_lines).clear();
+              id(state) = 0;
+            }
+          }
+
+          ESP_LOGI("term", "enqueued %d chunk(s) gid=%d alert=%d sticky=%d queue=%d",
+                   (int)chunks.size(), gid, alert_flag, sticky_flag,
+                   (int)id(msg_queue).size());
+      - script.execute: save_queue
+
+  - id: force_advance
+    mode: single
+    then:
+      - lambda: |-
+          id(ghost_lines) = id(visible_lines);
+          id(ghost_is_alert) =
+            (id(cur_idx) < (int)id(chunk_alert).size())
+            && id(chunk_alert)[id(cur_idx)] != 0;
+          id(ghost_started_ms) = millis();
+          id(state) = 3;
+          id(state_started_ms) = millis() - (uint32_t)id(clear_pause_ms_cfg).state;
+          id(visible_lines).clear();
+
+  - id: save_queue
+    mode: single
+    then:
+      - lambda: |-
+          gt::save_state(id(msg_queue), id(chunk_group), id(chunk_alert),
+                         id(chunk_sticky), id(next_group_id));
+
+  - id: load_queue
+    mode: single
+    then:
+      - lambda: |-
+          gt::load_state(id(msg_queue), id(chunk_group), id(chunk_alert),
+                         id(chunk_sticky), id(next_group_id));
+
+interval:
+  - interval: 5ms
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          if (id(msg_queue).empty()) {
+            id(state) = 0;
+            return;
+          }
+          const int max_cols = (int)id(max_cols_cfg).state;
+          const int max_rows = (int)id(max_rows_cfg).state;
+          float _cps = (float)id(typewriter_cps_cfg).state;
+          if (_cps < 1.0f) _cps = 1.0f;
+          const uint32_t char_period_ms = (uint32_t)(1000.0f / _cps);
+          const uint32_t pause_after_ms = (uint32_t)id(pause_after_ms_cfg).state;
+          const uint32_t clear_pause_ms = (uint32_t)id(clear_pause_ms_cfg).state;
+
+          switch (id(state)) {
+            case 0: {  // IDLE -> start typing first message
+              id(cur_idx) = 0;
+              id(char_idx) = 0;
+              id(visible_lines).clear();
+              id(state) = 1;
+              id(state_started_ms) = now;
+              id(last_char_ms) = 0;
+              break;
+            }
+            case 1: {  // TYPING — at most one char per tick, no catch-up.
+              if (id(cur_idx) >= (int)id(msg_queue).size()) {
+                id(cur_idx) = 0;
+              }
+              const std::string& m = id(msg_queue)[id(cur_idx)];
+
+              if (id(char_idx) >= (int)m.size()) {
+                int cur_g = (id(cur_idx) < (int)id(chunk_group).size())
+                              ? id(chunk_group)[id(cur_idx)] : 0;
+                int next_idx = id(cur_idx) + 1;
+                bool same_group = (cur_g != 0)
+                                  && (next_idx < (int)id(msg_queue).size())
+                                  && (next_idx < (int)id(chunk_group).size())
+                                  && (id(chunk_group)[next_idx] == cur_g);
+                if (same_group) {
+                  if (!id(visible_lines).empty()) {
+                    std::string& last = id(visible_lines).back();
+                    if (!last.empty() && last.back() != ' '
+                        && (int)last.size() < max_cols) {
+                      last.push_back(' ');
+                    }
+                  }
+                  id(cur_idx) = next_idx;
+                  id(char_idx) = 0;
+                  id(last_char_ms) = now;
+                } else {
+                  id(state) = 2;
+                  id(state_started_ms) = now;
+                }
+                break;
+              }
+
+              if (now - id(last_char_ms) < char_period_ms) break;
+
+              char c = m[id(char_idx)];
+              if (id(visible_lines).empty()) {
+                id(visible_lines).push_back("");
+              }
+              std::string& last = id(visible_lines).back();
+
+              bool starts_word = (c != ' ' && c != '\n')
+                                 && (last.empty() || last.back() == ' ');
+              bool cur_alert =
+                (id(cur_idx) < (int)id(chunk_alert).size())
+                && id(chunk_alert)[id(cur_idx)] != 0;
+              if (starts_word) {
+                int wend = id(char_idx);
+                while (wend < (int)m.size()
+                       && m[wend] != ' ' && m[wend] != '\n') {
+                  wend++;
+                }
+                int word_len = wend - id(char_idx);
+                if (word_len <= max_cols
+                    && (int)last.size() + word_len > max_cols) {
+                  if ((int)id(visible_lines).size() >= max_rows) {
+                    id(ghost_lines) = id(visible_lines);
+                    id(ghost_is_alert) = cur_alert;
+                    id(ghost_started_ms) = now;
+                  }
+                  id(visible_lines).push_back("");
+                  if ((int)id(visible_lines).size() > max_rows) {
+                    id(visible_lines).erase(id(visible_lines).begin());
+                  }
+                }
+              }
+
+              std::string& cur = id(visible_lines).back();
+              if (c == '\n' || (int)cur.size() >= max_cols) {
+                if ((int)id(visible_lines).size() >= max_rows) {
+                  id(ghost_lines) = id(visible_lines);
+                  id(ghost_is_alert) = cur_alert;
+                  id(ghost_started_ms) = now;
+                }
+                id(visible_lines).push_back("");
+                if ((int)id(visible_lines).size() > max_rows) {
+                  id(visible_lines).erase(id(visible_lines).begin());
+                }
+                if (c != '\n' && c != ' ') {
+                  id(visible_lines).back().push_back(c);
+                }
+              } else if (cur.empty() && c == ' ') {
+                // Suppress leading spaces on a freshly-wrapped line.
+              } else {
+                cur.push_back(c);
+              }
+              id(char_idx)++;
+              id(last_char_ms) = now;
+              break;
+            }
+            case 2: {  // PAUSE_AFTER
+              if (now - id(state_started_ms) >= pause_after_ms) {
+                id(ghost_lines) = id(visible_lines);
+                id(ghost_is_alert) =
+                  (id(cur_idx) < (int)id(chunk_alert).size())
+                  && id(chunk_alert)[id(cur_idx)] != 0;
+                id(ghost_started_ms) = now;
+                id(visible_lines).clear();
+                id(state) = 3;
+                id(state_started_ms) = now;
+              }
+              break;
+            }
+            case 3: {  // CLEAR_PAUSE
+              if (now - id(state_started_ms) >= clear_pause_ms) {
+                if (!id(msg_queue).empty()) {
+                  // Sticky messages loop back to the start of their own group
+                  // instead of advancing to the next group.
+                  bool cur_sticky =
+                    (id(cur_idx) < (int)id(chunk_sticky).size())
+                    && id(chunk_sticky)[id(cur_idx)] != 0;
+                  if (cur_sticky) {
+                    int idx = id(cur_idx);
+                    while (idx > 0
+                           && !gt::is_group_start(id(chunk_group), idx)) {
+                      idx--;
+                    }
+                    id(cur_idx) = idx;
+                  } else {
+                    id(cur_idx) = (id(cur_idx) + 1) % id(msg_queue).size();
+                  }
+                }
+                id(char_idx) = 0;
+                id(state) = 1;
+                id(state_started_ms) = now;
+                id(last_char_ms) = 0;
+              }
+              break;
+            }
+          }
+
+  - interval: 500ms
+    then:
+      - lambda: id(cursor_on) = !id(cursor_on);
+
+  # Status-LED ↔ alert sync. Picks colour + effect based on the FIRST of
+  # `:nf-heart:` / `:bolt:` / `:check:` glyphs found in the current chunk;
+  # default alert (no marker) is amber scan. Edge-triggered on (alert_kind)
+  # so we only touch the LightCall when the state actually changes.
+  # Also handles backlight on/off for the Sleep-when-idle feature.
+  - interval: 200ms
+    then:
+      - lambda: |-
+          // Backlight + display-refresh management for Sleep-when-idle.
+          // On sleep entry we drop the display update_interval to 60 s
+          // (essentially "never") so the SPI flush stops eating ~10 mA.
+          // On wake we restore it to 16 ms before the backlight fades in,
+          // so the first frame of new content is ready when the user can
+          // see the panel.
+          static bool last_sleep = false;
+          bool sleep_now = id(sleep_when_idle_cfg).state
+                           && id(msg_queue).empty();
+          if (sleep_now != last_sleep) {
+            last_sleep = sleep_now;
+            if (sleep_now) {
+              id(term_display).set_update_interval(60000);
+              auto call = id(backlight).turn_off();
+              call.set_transition_length(300);
+              call.perform();
+              gt::set_cpu_freq(80);   // drop CPU last — SPI flushed at 240
+            } else {
+              gt::set_cpu_freq(240);  // ramp CPU first — display + LEDs need it
+              id(term_display).set_update_interval(16);
+              auto call = id(backlight).turn_on();
+              call.set_transition_length(300);
+              call.perform();
+            }
+          }
+
+          // 0 = off, 1 = default amber, 2 = heart-red, 3 = bolt-blue, 4 = check-green
+          static int last_kind = 0;
+
+          int kind = 0;  // off if no alert showing
+          bool is_alert =
+            (id(state) != 0)
+            && (id(cur_idx) < (int)id(chunk_alert).size())
+            && (id(chunk_alert)[id(cur_idx)] != 0);
+          if (is_alert) {
+            const std::string &msg = id(msg_queue)[id(cur_idx)];
+            // UTF-8 byte sequences for the trigger glyphs.
+            static const char HEART[]   = "\xEF\x80\x84";   // U+F004 :nf-heart:
+            static const char HEART2[]  = "\xE2\x99\xA5";   // U+2665 :heart: ♥
+            static const char BOLT[]    = "\xE2\x9A\xA1";   // U+26A1 :bolt:
+            static const char CHECK[]   = "\xEF\x80\x8C";   // U+F00C :check:
+            static const char XMARK[]   = "\xEF\x80\x8D";   // U+F00D :x:
+            static const char WARNING[] = "\xEF\x81\xB1";   // U+F071 :warning:
+            // Either heart glyph triggers — take the earliest occurrence.
+            size_t h  = std::min(msg.find(HEART), msg.find(HEART2));
+            size_t b  = msg.find(BOLT);
+            size_t c  = msg.find(CHECK);
+            size_t x  = msg.find(XMARK);
+            size_t w  = msg.find(WARNING);
+            size_t first = std::string::npos;
+            kind = 1;  // default amber pulse unless a marker overrides
+            if (h != std::string::npos && (first == std::string::npos || h < first)) {
+              first = h; kind = 2;
+            }
+            if (b != std::string::npos && (first == std::string::npos || b < first)) {
+              first = b; kind = 3;
+            }
+            if (c != std::string::npos && (first == std::string::npos || c < first)) {
+              first = c; kind = 4;
+            }
+            if (x != std::string::npos && (first == std::string::npos || x < first)) {
+              first = x; kind = 5;
+            }
+            if (w != std::string::npos && (first == std::string::npos || w < first)) {
+              first = w; kind = 6;
+            }
+          }
+
+          if (kind == last_kind) return;
+
+          // Entering alert from no-alert: snapshot whatever HA had the strip
+          // set to, so we can put it back when the alert clears.
+          if (last_kind == 0 && kind != 0) {
+            auto ld = id(status_leds);
+            id(led_saved_on)         = ld->remote_values.is_on();
+            id(led_saved_r)          = ld->remote_values.get_red();
+            id(led_saved_g)          = ld->remote_values.get_green();
+            id(led_saved_b)          = ld->remote_values.get_blue();
+            id(led_saved_brightness) = ld->remote_values.get_brightness();
+            id(led_saved_effect)     = ld->get_effect_name();
+          }
+          last_kind = kind;
+
+          // Exiting alert: restore the saved HA state (default = off).
+          if (kind == 0) {
+            if (id(led_saved_on)) {
+              auto call = id(status_leds).turn_on();
+              call.set_transition_length(0);
+              call.set_color_mode(esphome::light::ColorMode::RGB);
+              call.set_red(id(led_saved_r));
+              call.set_green(id(led_saved_g));
+              call.set_blue(id(led_saved_b));
+              call.set_brightness(id(led_saved_brightness));
+              const std::string &eff = id(led_saved_effect);
+              call.set_effect(eff.empty() ? "None" : eff);
+              call.perform();
+            } else {
+              auto call = id(status_leds).turn_off();
+              call.set_transition_length(0);
+              call.perform();
+            }
+            return;
+          }
+          // Force the previous effect off first so the next effect samples
+          // the fresh colour we set, not the colour interpolated mid-fade.
+          {
+            auto reset = id(status_leds).turn_on();
+            reset.set_effect("None");
+            reset.set_transition_length(0);
+            reset.perform();
+          }
+          auto call = id(status_leds).turn_on();
+          call.set_transition_length(0);
+          call.set_color_mode(esphome::light::ColorMode::RGB);
+          call.set_brightness(1.0f);
+          switch (kind) {
+            case 2:  // :nf-heart: / :heart: → pulse red
+              call.set_red(1.0f); call.set_green(0.0f); call.set_blue(0.0f);
+              call.set_effect("pulse");
+              break;
+            case 3:  // :bolt: → flicker very-white-blue at 25% baseline
+              call.set_red(0.75f); call.set_green(0.85f); call.set_blue(1.0f);
+              call.set_brightness(0.25f);
+              call.set_effect("flicker");
+              break;
+            case 4:  // :check: → scan green
+              call.set_red(0.0f); call.set_green(1.0f); call.set_blue(0.0f);
+              call.set_effect("scan");
+              break;
+            case 5:  // :x: → scan red
+              call.set_red(1.0f); call.set_green(0.0f); call.set_blue(0.0f);
+              call.set_effect("scan");
+              break;
+            case 6:  // :warning: → scan amber
+              call.set_red(1.0f); call.set_green(0.69f); call.set_blue(0.0f);
+              call.set_effect("scan");
+              break;
+            default:  // alert with no marker → pulse amber
+              call.set_red(1.0f); call.set_green(0.69f); call.set_blue(0.0f);
+              call.set_effect("pulse");
+          }
+          call.perform();
