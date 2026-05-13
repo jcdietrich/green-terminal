@@ -102,13 +102,21 @@ Once adopted, the device exposes:
 
 ## Further reading
 
-The script bundles its own reference docs:
+The same content is available both inside the script (`send_msg.py
+--help-*`) and as standalone docs:
+
+| Doc                                            | Script flag        | Covers                                  |
+| ---------------------------------------------- | ------------------ | --------------------------------------- |
+| [docs/help-summary.md](docs/help-summary.md)   | `--help-summary`   | Prose project overview                  |
+| [docs/help-api.md](docs/help-api.md)           | `--help-api`       | Ingestion API + MQTT topics             |
+| [docs/help-controls.md](docs/help-controls.md) | `--help-controls`  | Every HA-exposed tunable                |
+| [docs/help-leds.md](docs/help-leds.md)         | `--help-leds`      | Status-LED behaviour + effects          |
+
+The script also has two runtime-computed reference commands:
 
 ```sh
-send_msg.py --help-summary       prose project overview
-send_msg.py --help-api           ingestion API + MQTT topics
-send_msg.py --help-controls      every HA tunable
-send_msg.py --help-leds          status-LED behaviour + effects
+send_msg.py --list-shortcuts     # every `:name:` glyph token
+send_msg.py --list-numbers       # live values of every tunable
 ```
 
 ## Repo layout
