@@ -50,7 +50,7 @@ screen sits where the slide would when inside, and the LED
 strip sits above it so that the lights shine thru the slot
 where the slide would be loaded.
 
-You can see a [ short video of it ](https://photos.app.goo.gl/EWVZzDJHpLND7KFw8.)
+You can see a [ short video of it ](https://photos.app.goo.gl/EWVZzDJHpLND7KFw8)
 
 ## Setup
 
