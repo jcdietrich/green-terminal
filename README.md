@@ -43,6 +43,15 @@ stay punchy.
 - **No speaker** — beeps would need a piezo on a spare GPIO; real audio
   would need an I²S DAC
 
+### My Enclosure
+
+I have installed my setup into an old mini slide viewer. The 
+screen sits where the slide would when inside, and the LED
+strip sits above it so that the lights shine thru the slot
+where the slide would be loaded.
+
+You can see a [ short video of it ](https://photos.app.goo.gl/EWVZzDJHpLND7KFw8.)
+
 ## Setup
 
 1. Clone:
