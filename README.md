@@ -45,6 +45,7 @@ stay punchy.
 
 ### My Enclosure
 
+<img src="https://www.cambrianphoto.co.uk/cdn/shop/products/wh2-001654_01_2000x2000.jpg?v=1636371610" width="auto" height="180">
 I have installed my setup into an old mini slide viewer. The 
 screen sits where the slide would when inside, and the LED
 strip sits above it so that the lights shine thru the slot
