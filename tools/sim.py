@@ -66,13 +66,16 @@ class Tunables:
 
 
 def demo_tunables() -> Tunables:
-    """Real device defaults pull bloom/vignette to 0. Bump them for demos so
-    the showcase clips actually exhibit the CRT effects.
+    """Real device defaults pull bloom/vignette/ghost-intensity down for a
+    subtle CRT feel. Bump them for demos so the showcase clips actually
+    exhibit the effects after scanline + vignette + GIF quantization.
 
     Hold/clear timings are also shortened so scenes don't drag."""
     return Tunables(
         bloom_intensity=20,
         vignette=30,
+        ghost_intensity=160,        # default 60 is intentionally subtle
+        ghost_duration_ms=900,      # default 550 = ~8 frames at 15fps
         message_hold_ms=2000,
         clear_pause_ms=1000,
     )
@@ -193,7 +196,7 @@ class Cursor:
 @dataclass
 class Ghost:
     lines: List[str] = field(default_factory=list)
-    started_ms: int = 0
+    age_ms: int = 0                # 0 = just-started ghost, fades over ghost_duration_ms
     is_alert: bool = False
 
 
@@ -431,7 +434,7 @@ def render_frame(
         # Ghost layer (drawn first; bright text overdraws where it can).
         ghost_active = False
         if frame.ghost and frame.ghost.lines and t.ghost_duration_ms > 0:
-            ghost_age = now_ms - frame.ghost.started_ms
+            ghost_age = frame.ghost.age_ms
             if 0 <= ghost_age < t.ghost_duration_ms:
                 ghost_active = True
                 tg = 1.0 - ghost_age / t.ghost_duration_ms
@@ -531,6 +534,14 @@ class Scenario:
     idle_intro_ms: int = 0           # matrix rain before the first message
     idle_outro_ms: int = 0           # matrix rain after final clear
     sticky_loops: int = 2            # how many times sticky re-types
+    # If true, end the last segment with a clear_queue snap (type → hold
+    # → idle) instead of the usual clear→home→loop. Matches what the
+    # device does when something calls clear_queue / send_msg.py --clear
+    # while a single-message queue is being displayed. With a single
+    # non-sticky message the device otherwise re-types forever (`cur_idx
+    # = (cur_idx+1) % msg_queue.size()`), so idle rain only resumes when
+    # the queue is actually emptied.
+    clear_queue_at_end: bool = False
     fps: int = FPS
     duration_ms: int = 0             # auto-computed from segments if 0
 
@@ -540,13 +551,18 @@ class Scenario:
 
     def _compute_duration_ms(self) -> int:
         total = self.idle_intro_ms + self.idle_outro_ms
-        for seg in self.segments:
+        for i, seg in enumerate(self.segments):
             loops = self.sticky_loops if seg.is_sticky else 1
             phases = _segment_phases(seg, self.tunables, loops)
+            is_last = i == len(self.segments) - 1
+            if self.clear_queue_at_end and is_last:
+                phases = [(p, d) for p, d in phases if p in ("type", "hold")]
             total += sum(d for _, d in phases)
         # Drop the final "home" pause for non-rain-outro scenarios so we
         # don't trail with a black cursor screen.
-        if self.idle_outro_ms == 0 and self.segments:
+        if (self.idle_outro_ms == 0
+                and self.segments
+                and not self.clear_queue_at_end):
             total -= self.tunables.clear_pause_ms
         return total
 
@@ -580,6 +596,9 @@ def build_frame(scenario: Scenario, ms: int) -> Frame:
     for seg_idx, seg in enumerate(scenario.segments):
         loops = scenario.sticky_loops if seg.is_sticky else 1
         phases = _segment_phases(seg, t, loops)
+        is_last = seg_idx == len(scenario.segments) - 1
+        if scenario.clear_queue_at_end and is_last:
+            phases = [(p, d) for p, d in phases if p in ("type", "hold")]
         seg_dur = sum(d for _, d in phases)
         if rel < seg_dur:
             return _frame_within_segment(
@@ -674,13 +693,12 @@ def _frame_within_phase(
     elif phase == "clear":
         # Ghost decays over phase_dur (which equals ghost_duration_ms)
         ghost_lines = visible_window(wrap_text(seg.text))
-        ghost_started = -phase_rel  # so that age == phase_rel
         return Frame(
             visible_lines=[],
             fg_rgb=fg,
             ghost=Ghost(
                 lines=ghost_lines,
-                started_ms=ghost_started,
+                age_ms=phase_rel,
                 is_alert=seg.is_alert,
             ),
             footer=footer,
@@ -786,10 +804,16 @@ def scenario_sticky() -> Scenario:
 def scenario_rain_message_rain() -> Scenario:
     return Scenario(
         name="rain",
-        description="Idle matrix rain → message arrives → returns to rain.",
+        description=(
+            "Idle matrix rain → a message arrives and types out → "
+            "`clear_queue` is called and the queue empties → rain resumes. "
+            "(Without the explicit clear, a single non-sticky message would "
+            "re-loop instead — rain only returns when the queue is empty.)"
+        ),
         segments=[Segment("INCOMING")],
         idle_intro_ms=2500,
         idle_outro_ms=3500,
+        clear_queue_at_end=True,
     )
 
 

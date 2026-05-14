@@ -28,7 +28,7 @@ stay punchy.
 **Sticky alert** — footer shows `- 1/1 -` and the message re-types itself indefinitely until cleared.<br>
 ![sticky demo](docs/img/sticky.gif) &nbsp;·&nbsp; [MP4](docs/img/sticky.mp4)
 
-**Idle matrix rain** — hex glyphs fall in per-column streams with bright heads and fading tails; a message arrives, plays out, then rain resumes.<br>
+**Idle matrix rain** — shown only when the queue is empty. A message arrives and types out, then `clear_queue` empties the queue and rain resumes. (Without the clear, a single non-sticky message would re-type forever — `cur_idx = (cur_idx + 1) % queue_size`.)<br>
 ![rain demo](docs/img/rain.gif) &nbsp;·&nbsp; [MP4](docs/img/rain.mp4)
 
 > Render or re-render locally with `python tools/sim.py --all`. Requires
