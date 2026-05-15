@@ -694,6 +694,22 @@ qmi8658:
   accel_odr: 500HZ
   gyro_odr: 500HZ
 
+# The qmi8658 external component's header pulls in the sensor,
+# binary_sensor, AND text_sensor frameworks, but doesn't declare any
+# of them as AUTO_LOAD, so the build fails unless those keys appear
+# somewhere in the yaml. `sensor:` already exists for the accel axes;
+# these inert template stubs pull in the other two frameworks so the
+# component's .cpp can compile.
+binary_sensor:
+  - platform: template
+    id: _qmi8658_bs_autoload
+    internal: true
+
+text_sensor:
+  - platform: template
+    id: _qmi8658_ts_autoload
+    internal: true
+
 sensor:
   - platform: qmi8658
     qmi8658_id: imu
