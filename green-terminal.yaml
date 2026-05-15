@@ -25,6 +25,18 @@ esphome:
     then:
       - script.execute: load_queue
 
+# The QMI8658 IMU on this Waveshare board isn't supported by ESPHome
+# core. The Djelibeybi component is Waveshare-focused and exposes raw
+# accel + gyro + on_motion / on_orientation_change triggers. Tap
+# detection is done in firmware (see the accel_z.on_value lambda
+# below) because none of the community components surface the chip's
+# hardware tap interrupt.
+external_components:
+  - source:
+      type: git
+      url: https://github.com/Djelibeybi/esphome-qmi8658
+    components: [qmi8658]
+
 esp32:
   board: esp32-s3-devkitc-1
   variant: esp32s3
@@ -655,9 +667,64 @@ touchscreen:
     id: my_touchscreen
     i2c_id: i2c_touch
     interrupt_pin: GPIO46
+    # Screen tap is a secondary path into the same discriminator the IMU
+    # feeds (`handle_tap` resolves 1 tap → skip, 2 taps → clear current
+    # group, after a 350 ms quiet window). Tapping the case is the
+    # intended trigger — see the `qmi8658:` block below for the impulse
+    # detector.
     on_touch:
       then:
-        - script.execute: force_advance
+        - lambda: 'id(pending_tap_count) += 1;'
+        - script.execute: handle_tap
+
+# IMU + impulse tap detector. We sample accel at 50 Hz (update_interval
+# = 20 ms); each fresh sample runs a short lambda that computes
+# |accel| - 1G and fires a tap event when the deviation exceeds a
+# threshold, subject to a refractory period so a single physical tap
+# can't register as two. Tap events bump the same `pending_tap_count`
+# the touchscreen uses, so single/double-tap behaviour is identical
+# whether you tap the screen or the case.
+qmi8658:
+  id: imu
+  i2c_id: i2c_touch
+  address: 0x6B
+  update_interval: 20ms
+  accel_range: 4G
+  gyro_range: 512DPS
+  accel_odr: 500HZ
+  gyro_odr: 500HZ
+
+sensor:
+  - platform: qmi8658
+    qmi8658_id: imu
+    accel_x:
+      id: imu_ax
+      internal: true
+    accel_y:
+      id: imu_ay
+      internal: true
+    accel_z:
+      id: imu_az
+      internal: true
+      on_value:
+        then:
+          - lambda: |-
+              float ax = id(imu_ax).state;
+              float ay = id(imu_ay).state;
+              float az = id(imu_az).state;
+              if (std::isnan(ax) || std::isnan(ay) || std::isnan(az)) return;
+              float mag = sqrtf(ax * ax + ay * ay + az * az);
+              float dev = fabsf(mag - 9.81f);   // deviation from 1G rest
+              const float thresh = (float)id(tap_threshold_cfg).state;
+              const uint32_t refractory_ms =
+                  (uint32_t)id(tap_refractory_ms_cfg).state;
+              const uint32_t now = millis();
+              if (dev >= thresh
+                  && (now - id(last_tap_ms)) >= refractory_ms) {
+                id(last_tap_ms) = now;
+                id(pending_tap_count) += 1;
+                id(handle_tap).execute();
+              }
 
 number:
   - platform: template
@@ -1014,6 +1081,41 @@ number:
     unit_of_measurement: "%"
     icon: "mdi:dots-grid"
 
+  - platform: template
+    name: "Tap threshold"
+    id: tap_threshold_cfg
+    entity_category: config
+    min_value: 1.0
+    max_value: 30.0
+    step: 0.5
+    # m/s² above 1G rest. ~3 m/s² = a deliberate finger tap; bump higher
+    # if handling the device fires false positives, lower if light taps
+    # are missed.
+    initial_value: 3.5
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "m/s²"
+    icon: "mdi:gesture-tap"
+
+  - platform: template
+    name: "Tap refractory"
+    id: tap_refractory_ms_cfg
+    entity_category: config
+    min_value: 30
+    max_value: 250
+    step: 10
+    # Minimum gap between accepted taps so one physical tap impulse
+    # (which lasts ~30–80 ms) doesn't register as multiple events.
+    # Must be < the discriminator window (350 ms) so a real double-tap
+    # registers as two events.
+    initial_value: 80
+    restore_value: yes
+    optimistic: true
+    mode: slider
+    unit_of_measurement: "ms"
+    icon: "mdi:timer-sand"
+
 
 
 
@@ -1086,6 +1188,19 @@ globals:
   - id: led_saved_effect
     type: std::string
     initial_value: '"None"'
+
+  # Tap-discriminator state: bumped on every touch (screen or IMU
+  # impulse), resolved by the `handle_tap` script after a 350 ms window
+  # of inactivity.
+  - id: pending_tap_count
+    type: int
+    initial_value: '0'
+
+  # Timestamp of the last accepted IMU tap, for the refractory window
+  # that prevents one physical tap from registering as multiple events.
+  - id: last_tap_ms
+    type: uint32_t
+    initial_value: '0'
 
 script:
   - id: enqueue_message
@@ -1195,6 +1310,62 @@ script:
           id(state) = 3;
           id(state_started_ms) = millis() - (uint32_t)id(clear_pause_ms_cfg).state;
           id(visible_lines).clear();
+
+  # Remove just the currently-displayed message group from the queue.
+  # Touchscreen double-tap calls this; HA/CLI callers use `clear_indices`
+  # with the explicit group number instead.
+  - id: clear_current_group
+    mode: single
+    then:
+      - lambda: |-
+          if (id(msg_queue).empty()) return;
+          int cur_g = gt::group_position(id(chunk_group), id(cur_idx));
+          if (cur_g <= 0) return;
+          int chunk_idx = gt::find_group_start(id(chunk_group), cur_g);
+          if (chunk_idx < 0) return;
+          bool was_alert = (id(cur_idx) < (int)id(chunk_alert).size())
+                           && id(chunk_alert)[id(cur_idx)] != 0;
+          int removed = gt::remove_group_at(id(msg_queue),
+                                            id(chunk_group),
+                                            id(chunk_alert),
+                                            id(chunk_sticky),
+                                            cur_g);
+          if (removed <= 0) return;
+          id(ghost_lines) = id(visible_lines);
+          id(ghost_is_alert) = was_alert;
+          id(ghost_started_ms) = millis();
+          id(visible_lines).clear();
+          id(char_idx) = 0;
+          if (chunk_idx <= id(cur_idx)) {
+            id(cur_idx) = std::max(0, id(cur_idx) - removed);
+          }
+          if (id(msg_queue).empty()
+              || (size_t)id(cur_idx) >= id(msg_queue).size()) {
+            id(cur_idx) = 0;
+            id(state) = 0;
+          }
+          id(state_started_ms) = millis();
+          ESP_LOGI("term", "cleared current group %d (chunks=%d), queue=%d",
+                   cur_g, removed, (int)id(msg_queue).size());
+      - script.execute: save_queue
+
+  # Tap-vs-double-tap discriminator. Each touch bumps `pending_tap_count`
+  # and (re)starts this script; after 350 ms of touch inactivity the
+  # script fires the resolved gesture and resets the counter. `mode:
+  # restart` lets every fresh tap cancel the in-flight delay so the
+  # window is anchored to the LAST touch in a burst, not the first.
+  - id: handle_tap
+    mode: restart
+    then:
+      - delay: 350ms
+      - if:
+          condition:
+            lambda: 'return id(pending_tap_count) >= 2;'
+          then:
+            - script.execute: clear_current_group
+          else:
+            - script.execute: force_advance
+      - lambda: 'id(pending_tap_count) = 0;'
 
   - id: save_queue
     mode: single

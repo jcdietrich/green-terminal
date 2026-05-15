@@ -64,6 +64,13 @@ Tunable, persist in NVS, live in HA's "Configuration" panel.
 | `rain_speed`   | 10..300 %| 100     | Scales the per-column falling rate (base 1.5..3.5 rows/s). |
 | `rain_density` | 10..100 %| 100     | Column coverage. 100 = every column, 50 = every other, 25 = every 4th. |
 
+### Tap input
+
+| Slug                | Unit | Range      | Default | Notes |
+| ------------------- | ---- | ---------- | ------- | ----- |
+| `tap_threshold`     | m/s² | 1.0..30.0  | 3.5     | Accel magnitude above 1G rest that registers as a tap. Lower for lighter taps; raise if handling false-triggers. |
+| `tap_refractory_ms` | ms   | 30..250    | 80      | Minimum gap between accepted taps so one physical impulse (≈30–80 ms) doesn't register multiple times. Must stay below the 350 ms discriminator window. |
+
 ## Other entities
 
 - **Light: "Backlight"** (monochromatic) — LCD backlight on/off +
@@ -78,8 +85,14 @@ Tunable, persist in NVS, live in HA's "Configuration" panel.
   whenever the message queue is empty. Send any message and the
   backlight fades back on and typing resumes normally. Pure
   power-saver — settings and state are preserved.
-- **Touchscreen** — tap anywhere to skip to the next message
-  (equivalent to calling the `skip` action).
+- **Tap input** — tap the device case (or screen) to skip to the next
+  message; double-tap to clear the currently-displayed message group.
+  The QMI8658 IMU feeds the firmware a magnitude spike whenever the
+  case is tapped (threshold + 80 ms refractory). Screen taps via the
+  CST816 panel are a secondary path into the same discriminator. The
+  single-tap resolves ~350 ms after the last tap so it can be told
+  apart from a double-tap. Tunable via the "Tap threshold" (m/s²
+  above 1G) and "Tap refractory" (ms) number entities.
 
 ## Inspect / set from the CLI
 

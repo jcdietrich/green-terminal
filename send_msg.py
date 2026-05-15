@@ -598,6 +598,17 @@ IDLE MATRIX RAIN
   rain_density           %               10..100   default 100
       Column coverage. 100 = every column, 50 = every other, 25 = every 4th.
 
+TAP INPUT
+  tap_threshold          m/s²            1.0..30.0 default 3.5
+      Accel magnitude (above 1G rest) that registers as a tap. Lower to
+      catch lighter taps; raise if handling the device false-triggers.
+
+  tap_refractory_ms      ms              30..250   default 80
+      Minimum gap between accepted taps so a single physical impulse
+      (≈30–80 ms long) doesn't register multiple times. Must stay
+      below the discriminator window (350 ms) so real double-taps
+      register as two events.
+
 ═══════════════════════════════════════════════════════════════════════
 OTHER ENTITIES
 ═══════════════════════════════════════════════════════════════════════
@@ -616,8 +627,15 @@ OTHER ENTITIES
       and the backlight fades back on and typing resumes normally.
       Pure power-saver — settings and state are preserved.
 
-  Touchscreen:  tap anywhere to skip to the next message
-      (Equivalent to calling the `skip` action.)
+  Tap input:    Tap the device case (or screen) to skip to the next
+      message; double-tap to clear the currently-displayed message
+      group. The QMI8658 IMU on the Waveshare board feeds the firmware
+      a magnitude spike whenever the case is tapped (threshold + 80 ms
+      refractory). Screen taps via the CST816 panel are a secondary
+      path into the same discriminator. The single-tap resolves ~350 ms
+      after the last tap so it can be told apart from a double-tap.
+      Tunable via the "Tap threshold" (m/s² above 1G) and "Tap
+      refractory" (ms) number entities.
 
 ═══════════════════════════════════════════════════════════════════════
 INSPECT / SET FROM THE CLI
