@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import re
 import shutil
 import subprocess
 import sys
@@ -714,6 +715,30 @@ def _frame_within_phase(
     return Frame(fg_rgb=fg, footer=footer)
 
 
+def get_unique_path(path: Path) -> Path:
+    """If path exists, add _01, _02 etc. before extension until free."""
+    if not path.exists():
+        return path
+    parent = path.parent
+    stem = path.stem
+    suffix = path.suffix
+
+    # Check if stem already ends in _NN
+    match = re.search(r'_(\d+)$', stem)
+    if match:
+        base = stem[:match.start()]
+        num = int(match.group(1)) + 1
+    else:
+        base = stem
+        num = 1
+
+    while True:
+        candidate = parent / f"{base}_{num:02d}{suffix}"
+        if not candidate.exists():
+            return candidate
+        num += 1
+
+
 # ───────────────────────── Encoder ─────────────────────────────────────────
 def encode_mp4(scenario: Scenario, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -737,6 +762,7 @@ def encode_mp4(scenario: Scenario, out_path: Path) -> None:
         "-preset", "slow",
         "-crf", "20",
         "-movflags", "+faststart",
+        "-f", "mp4",  # Force mp4 container even if extension is .mp3
         str(out_path),
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
@@ -834,6 +860,7 @@ def main() -> int:
     p.add_argument("--all", action="store_true", help="Render every scenario")
     p.add_argument("--scenario", metavar="NAME", help="Render one scenario by name")
     p.add_argument("--list", action="store_true", help="List available scenarios")
+    p.add_argument("--name", help="Output filename (for piped input or overriding scenario name)")
     args = p.parse_args()
 
     if not shutil.which("ffmpeg"):
@@ -843,13 +870,24 @@ def main() -> int:
         print(f"ERROR: font missing: {FONT_PATH}", file=sys.stderr)
         return 1
 
+    # Check for piped input
+    piped_text = None
+    if not sys.stdin.isatty():
+        piped_text = sys.stdin.read().strip()
+
     if args.list:
         for s in SCENARIOS.values():
             print(f"  {s.name:<8} {s.description}")
         return 0
 
     targets: List[Scenario]
-    if args.all:
+    if piped_text:
+        targets = [Scenario(
+            name="piped",
+            description="Piped input from stdin",
+            segments=[Segment(piped_text)],
+        )]
+    elif args.all:
         targets = list(SCENARIOS.values())
     elif args.scenario:
         if args.scenario not in SCENARIOS:
@@ -863,7 +901,20 @@ def main() -> int:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for s in targets:
         print(f"[{s.name}] {s.description}")
-        encode_mp4(s, OUT_DIR / f"{s.name}.mp4")
+
+        # Determine output filename
+        if piped_text:
+            filename = args.name or "piped.mp4"
+        elif args.name and len(targets) == 1:
+            filename = args.name
+        else:
+            filename = f"{s.name}.mp4"
+
+        if "." not in filename:
+            filename += ".mp4"
+
+        out_path = get_unique_path(OUT_DIR / filename)
+        encode_mp4(s, out_path)
     return 0
 
 
