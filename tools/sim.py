@@ -14,6 +14,9 @@ Usage:
     python tools/sim.py --all
     python tools/sim.py --scenario basic
     python tools/sim.py --list
+    echo "custom text" | python tools/sim.py                       # piped one-off
+    echo "custom text" | python tools/sim.py --name demo.mp4       # name the output
+    echo "custom text" | python tools/sim.py --footer "CPU: 42%"   # override x/N footer
 """
 
 from __future__ import annotations
@@ -869,7 +872,10 @@ SCENARIOS = {
 
 # ───────────────────────── CLI ─────────────────────────────────────────────
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p.add_argument("--all", action="store_true", help="Render every scenario")
     p.add_argument("--scenario", metavar="NAME", help="Render one scenario by name")
     p.add_argument("--list", action="store_true", help="List available scenarios")
