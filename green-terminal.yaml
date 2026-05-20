@@ -63,35 +63,44 @@ wifi:
 api:
   encryption:
     key: !secret api_key
-  actions:
-    - action: add_message
+  services:
+    - service: add_message
       variables:
-        message: string
+        msg_text: string
+        footer_text: string
       then:
+        - logger.log:
+            format: "API add_message: msg='%s' footer='%s'"
+            args: [ 'msg_text.c_str()', 'footer_text.c_str()' ]
         - script.execute:
             id: enqueue_message
-            msg: !lambda 'return message;'
+            msg: !lambda 'return msg_text;'
+            footer: !lambda 'return footer_text;'
             is_alert: false
             is_sticky: false
-    - action: add_alert
+    - service: add_alert
       variables:
-        message: string
+        msg_text: string
+        footer_text: string
       then:
         - script.execute:
             id: enqueue_message
-            msg: !lambda 'return message;'
+            msg: !lambda 'return msg_text;'
+            footer: !lambda 'return footer_text;'
             is_alert: true
             is_sticky: false
-    - action: add_sticky_alert
+    - service: add_sticky_alert
       variables:
-        message: string
+        msg_text: string
+        footer_text: string
       then:
         - script.execute:
             id: enqueue_message
-            msg: !lambda 'return message;'
+            msg: !lambda 'return msg_text;'
+            footer: !lambda 'return footer_text;'
             is_alert: true
             is_sticky: true
-    - action: clear_queue
+    - service: clear_queue
       then:
         - lambda: |-
             id(ghost_lines) = id(visible_lines);
@@ -103,6 +112,7 @@ api:
             id(chunk_group).clear();
             id(chunk_alert).clear();
             id(chunk_sticky).clear();
+            id(chunk_footer).clear();
             id(visible_lines).clear();
             id(cur_idx) = 0;
             id(char_idx) = 0;
@@ -153,6 +163,7 @@ api:
                                           id(chunk_group),
                                           id(chunk_alert),
                                           id(chunk_sticky),
+                                          id(chunk_footer),
                                           gpos);
               if (n > 0) {
                 groups_removed++;
@@ -186,6 +197,7 @@ api:
                                                  id(chunk_group),
                                                  id(chunk_alert),
                                                  id(chunk_sticky),
+                                                 id(chunk_footer),
                                                  id(cur_idx));
             // If we were typing an alert that just got removed, ghost the
             // current screen and reset to IDLE so the next tick picks a
@@ -228,7 +240,7 @@ api:
         - lambda: |-
             std::string json = gt::serialize_state(
               id(msg_queue), id(chunk_group), id(chunk_alert),
-              id(chunk_sticky), id(next_group_id));
+              id(chunk_sticky), id(chunk_footer), id(next_group_id));
             // Bracket the payload so the receiver can reassemble even if
             // ESPHome's log buffer chunks it into multiple lines.
             ESP_LOGI("term:state", "<<<DUMP %d>>>", (int)json.size());
@@ -255,6 +267,7 @@ mqtt:
         - script.execute:
             id: enqueue_message
             msg: !lambda 'return x;'
+            footer: !lambda 'return std::string("");'
             is_alert: false
             is_sticky: false
     - topic: green-terminal/alert
@@ -262,6 +275,7 @@ mqtt:
         - script.execute:
             id: enqueue_message
             msg: !lambda 'return x;'
+            footer: !lambda 'return std::string("");'
             is_alert: true
             is_sticky: false
     - topic: green-terminal/sticky-alert
@@ -269,6 +283,7 @@ mqtt:
         - script.execute:
             id: enqueue_message
             msg: !lambda 'return x;'
+            footer: !lambda 'return std::string("");'
             is_alert: true
             is_sticky: true
 
@@ -594,10 +609,23 @@ display:
         bool cur_sticky =
           (id(cur_idx) < (int)id(chunk_sticky).size())
           && id(chunk_sticky)[id(cur_idx)] != 0;
-        const char *fmt = cur_sticky ? "- %d/%d -" : "%d/%d";
-        it.printf(it.get_width() / 2, it.get_height() - mg,
-                  id(footer_font), fg, TextAlign::BASELINE_CENTER,
-                  fmt, cur_group, total_groups);
+        
+        std::string footer_text;
+        if (id(cur_idx) < (int)id(chunk_footer).size() && !id(chunk_footer)[id(cur_idx)].empty()) {
+          footer_text = id(chunk_footer)[id(cur_idx)];
+        } else {
+          char buf[32];
+          if (cur_sticky) {
+            std::snprintf(buf, sizeof(buf), "- %d/%d -", cur_group, total_groups);
+          } else {
+            std::snprintf(buf, sizeof(buf), "%d/%d", cur_group, total_groups);
+          }
+          footer_text = buf;
+        }
+
+        it.print(it.get_width() / 2, it.get_height() - mg,
+                 id(footer_font), fg, TextAlign::BASELINE_CENTER,
+                 footer_text.c_str());
       }
 
       // Subtle CRT scan lines — stippled (every other pixel) so the row
@@ -1150,6 +1178,9 @@ globals:
   - id: chunk_sticky        # parallel to msg_queue; 1 = pin PAUSE_AFTER until cleared
     type: 'std::vector<int>'
     restore_value: no
+  - id: chunk_footer        # parallel to msg_queue; override string for the x/N footer
+    type: 'std::vector<std::string>'
+    restore_value: no
   - id: next_group_id
     type: int
     initial_value: '1'
@@ -1223,34 +1254,33 @@ script:
     mode: single
     parameters:
       msg: string
+      footer: string
       is_alert: bool
       is_sticky: bool
     then:
       - lambda: |-
-          if (msg.empty()) return;
           const int input_cap = (int)id(input_cap_cfg).state;
           const int char_cap = (int)id(char_cap_cfg).state;
           const int split_thr = (int)id(split_threshold_cfg).state;
           const int queue_cap = (int)id(queue_cap_cfg).state;
 
-          // Expand `:name:` shortcuts (e.g. :heart: → ♥, :warning: → ) before
-          // any size enforcement or splitting.
+          // Expand shortcuts (e.g. :heart: → ♥) before size enforcement
           std::string expanded = gt::apply_emoji_shortcuts(msg);
           std::string m = expanded.substr(0, input_cap);
-          while (!m.empty() &&
-                 (m.back() == ' ' || m.back() == '\n' || m.back() == '\r')) {
+          
+          // Trim trailing whitespace
+          while (!m.empty() && (m.back() == ' ' || m.back() == '\n' || m.back() == '\r')) {
             m.pop_back();
           }
           if (m.empty()) return;
 
           std::vector<std::string> chunks;
           auto add_chunk = [&](std::string s) {
+            // Trim and cap
             size_t a = 0;
-            while (a < s.size() &&
-                   (s[a] == ' ' || s[a] == '\n' || s[a] == '\r')) a++;
+            while (a < s.size() && (s[a] == ' ' || s[a] == '\n' || s[a] == '\r')) a++;
             size_t b = s.size();
-            while (b > a &&
-                   (s[b-1] == ' ' || s[b-1] == '\n' || s[b-1] == '\r')) b--;
+            while (b > a && (s[b-1] == ' ' || s[b-1] == '\n' || s[b-1] == '\r')) b--;
             if (b <= a) return;
             s = s.substr(a, b - a);
             if ((int)s.size() > char_cap) s.resize(char_cap);
@@ -1274,8 +1304,7 @@ script:
               }
               add_chunk(m.substr(start, end - start));
               start = end;
-              while (start < m.size() &&
-                     (m[start] == ' ' || m[start] == '\n' || m[start] == '\r')) {
+              while (start < m.size() && (m[start] == ' ' || m[start] == '\n' || m[start] == '\r')) {
                 start++;
               }
             }
@@ -1292,13 +1321,17 @@ script:
             id(chunk_group).push_back(gid);
             id(chunk_alert).push_back(alert_flag);
             id(chunk_sticky).push_back(sticky_flag);
+            id(chunk_footer).push_back(footer);
           }
 
+          // Evict oldest if over capacity
           while ((int)id(msg_queue).size() > queue_cap) {
             int head_g = id(chunk_group).front();
+            // Don't evict part of the group we just added (extremely unlikely)
             if (head_g == gid && gid != 0) break;
             int n = gt::evict_oldest_group(id(msg_queue), id(chunk_group),
-                                           id(chunk_alert), id(chunk_sticky));
+                                           id(chunk_alert), id(chunk_sticky),
+                                           id(chunk_footer));
             if (n == 0) break;
             id(cur_idx) = std::max(0, id(cur_idx) - n);
             if (id(cur_idx) >= (int)id(msg_queue).size()) {
@@ -1309,8 +1342,8 @@ script:
             }
           }
 
-          ESP_LOGI("term", "enqueued %d chunk(s) gid=%d alert=%d sticky=%d queue=%d",
-                   (int)chunks.size(), gid, alert_flag, sticky_flag,
+          ESP_LOGI("term", "enqueued %d chunk(s) gid=%d alert=%d sticky=%d footer='%s' queue=%d",
+                   (int)chunks.size(), gid, alert_flag, sticky_flag, footer.c_str(),
                    (int)id(msg_queue).size());
       - script.execute: save_queue
 
@@ -1345,6 +1378,7 @@ script:
                                             id(chunk_group),
                                             id(chunk_alert),
                                             id(chunk_sticky),
+                                            id(chunk_footer),
                                             cur_g);
           if (removed <= 0) return;
           id(ghost_lines) = id(visible_lines);
@@ -1388,14 +1422,14 @@ script:
     then:
       - lambda: |-
           gt::save_state(id(msg_queue), id(chunk_group), id(chunk_alert),
-                         id(chunk_sticky), id(next_group_id));
+                         id(chunk_sticky), id(chunk_footer), id(next_group_id));
 
   - id: load_queue
     mode: single
     then:
       - lambda: |-
           gt::load_state(id(msg_queue), id(chunk_group), id(chunk_alert),
-                         id(chunk_sticky), id(next_group_id));
+                         id(chunk_sticky), id(chunk_footer), id(next_group_id));
 
 interval:
   - interval: 5ms

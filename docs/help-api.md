@@ -7,29 +7,33 @@
 
 ESPHome native API actions (called via `send_msg.py` or Home Assistant):
 
-### `add_message(message: string)`
+### `add_message(msg_text: string, footer_text: string = "")`
 Push a normal (green) message onto the queue. Long messages are split
 at word boundaries; chunks of the same source are typed continuously
-without inter-chunk pause and count as one group.
+without inter-chunk pause and count as one group. If `footer_text` is
+non-empty it replaces the default x/N counter in the bottom-centre
+footer for this message.
 
 ```sh
 send_msg.py "your text"
+send_msg.py "Heads up" --footer "CPU: 90%"
 echo "your text" | send_msg.py
 ```
 
-HA: `service: green_terminal.add_message` · `data: { message: "..." }`
+HA: `service: green_terminal.add_message` · `data: { msg_text: "...", footer_text: "" }`
 
-### `add_alert(message: string)`
+### `add_alert(msg_text: string, footer_text: string = "")`
 Same as `add_message` but flagged as an alert — rendered in the
 configured alert colour (default amber 255/176/0).
 
 ```sh
 send_msg.py --alert "warning text"
+send_msg.py --alert "CPU pegged" --footer "node-7"
 ```
 
 HA: `service: green_terminal.add_alert`
 
-### `add_sticky_alert(message: string)`
+### `add_sticky_alert(msg_text: string, footer_text: string = "")`
 Alert that re-loops on itself indefinitely instead of advancing to the
 next queued message. After typing out the message, it holds for
 `message_hold_time`, clears the screen, holds for `clear_pause`, and
@@ -160,6 +164,8 @@ namespace, key `state_json`. Format:
   "q": ["chunk1", "chunk2", "..."],
   "g": [0, 1, 1, 0],
   "a": [0, 1, 1, 0],
+  "s": [0, 0, 0, 1],
+  "f": ["", "", "CPU: 42%", ""],
   "n": 7
 }
 ```
@@ -167,6 +173,8 @@ namespace, key `state_json`. Format:
 - `q` — source chunks (after `:name:` expansion)
 - `g` — group ids (0 = standalone, >0 = split-group)
 - `a` — alert flags (parallel to `q`)
+- `s` — sticky flags (parallel to `q`)
+- `f` — footer override strings (parallel to `q`)
 - `n` — next_group_id counter
 
 Inspect any time with `send_msg.py --dump-state`.

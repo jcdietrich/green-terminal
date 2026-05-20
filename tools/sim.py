@@ -519,6 +519,7 @@ class Segment:
     text: str
     is_alert: bool = False
     is_sticky: bool = False
+    footer_override: str = ""
 
     def __post_init__(self) -> None:
         # Mirror the device's shortcut expansion that happens before storage.
@@ -628,9 +629,12 @@ def _frame_within_segment(
     fg = t.alert_rgb if seg.is_alert else t.text_rgb
     footer_num = seg_idx + 1
     if scenario.show_footer:
-        footer = (f"- {footer_num}/{total_groups} -"
-                  if seg.is_sticky
-                  else f"{footer_num}/{total_groups}")
+        if seg.footer_override:
+            footer = seg.footer_override
+        else:
+            footer = (f"- {footer_num}/{total_groups} -"
+                      if seg.is_sticky
+                      else f"{footer_num}/{total_groups}")
     else:
         footer = None
 
@@ -825,6 +829,14 @@ def scenario_sticky() -> Scenario:
         segments=[Segment(":heart: i love you", is_alert=True, is_sticky=True)],
         sticky_loops=2,
     )
+    
+    
+def scenario_footer() -> Scenario:
+    return Scenario(
+        name="footer",
+        description="Message with a custom footer override.",
+        segments=[Segment("System Status: OK", footer_override="CPU: 42%")],
+    )
 
 
 def scenario_rain_message_rain() -> Scenario:
@@ -850,6 +862,7 @@ SCENARIOS = {
         scenario_alert(),
         scenario_sticky(),
         scenario_rain_message_rain(),
+        scenario_footer(),
     ]
 }
 
@@ -861,6 +874,10 @@ def main() -> int:
     p.add_argument("--scenario", metavar="NAME", help="Render one scenario by name")
     p.add_argument("--list", action="store_true", help="List available scenarios")
     p.add_argument("--name", help="Output filename (for piped input or overriding scenario name)")
+    p.add_argument("--footer", metavar="TEXT", default="",
+                   help="Footer override for the piped/custom scenario "
+                        "(replaces the x/N counter, same as send_msg.py --footer)")
+    p.add_argument("--glow", type=int, help="Background phosphor glow intensity (0-255)")
     args = p.parse_args()
 
     if not shutil.which("ffmpeg"):
@@ -885,7 +902,7 @@ def main() -> int:
         targets = [Scenario(
             name="piped",
             description="Piped input from stdin",
-            segments=[Segment(piped_text)],
+            segments=[Segment(piped_text, footer_override=args.footer)],
         )]
     elif args.all:
         targets = list(SCENARIOS.values())
@@ -897,6 +914,10 @@ def main() -> int:
     else:
         p.print_help()
         return 1
+
+    if args.glow is not None:
+        for s in targets:
+            s.tunables.background_glow = args.glow
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     for s in targets:

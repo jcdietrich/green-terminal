@@ -92,6 +92,7 @@ MQTT, or Home Assistant once the device is adopted.
 ```sh
 # Normal messages
 send_msg.py "hello"
+send_msg.py "Heads up" --footer "CPU: 90%" # custom footer
 echo "hello from stdin" | send_msg.py
 cat poem.txt | send_msg.py
 

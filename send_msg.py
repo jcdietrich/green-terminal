@@ -13,6 +13,7 @@ Usage:
     python send_msg.py --clear-alerts            # remove only alert messages
     python send_msg.py --reset-leds              # turn off status LEDs + drop saved baseline
     python send_msg.py --set background_glow 10  # set a number entity
+    python send_msg.py "Heads up" --footer "CPU: 90%"  # custom x/N footer override
     python send_msg.py --list-numbers            # list tunable entities
     python send_msg.py --list-shortcuts          # list :name: glyph shortcuts
     python send_msg.py --dump-state              # print the persisted queue JSON
@@ -661,23 +662,28 @@ INGESTION — ways to push text onto the device
 
 ESPHome native API actions (called via this script or Home Assistant):
 
-  add_message(message: string)
+  add_message(msg_text: string, footer_text: string = "")
       Push a normal (green) message onto the queue. Long messages are
       split at word boundaries; chunks of the same source are typed
       continuously without inter-chunk pause and count as one group.
+      If footer_text is non-empty it replaces the default x/N counter
+      in the bottom-centre footer for this message.
 
       CLI:    send_msg.py "your text"
       CLI:    echo "your text" | send_msg.py
-      HA:     service green_terminal.add_message  data:  message: "..."
+      CLI:    send_msg.py "Heads up" --footer "CPU: 90%"
+      HA:     service green_terminal.add_message
+              data:  msg_text: "..."  footer_text: ""
 
-  add_alert(message: string)
+  add_alert(msg_text: string, footer_text: string = "")
       Same as add_message but flagged as an alert — rendered in the
       configured alert colour (default amber 255/176/0).
 
       CLI:    send_msg.py --alert "warning text"
+      CLI:    send_msg.py --alert "CPU pegged" --footer "node-7"
       HA:     service green_terminal.add_alert
 
-  add_sticky_alert(message: string)
+  add_sticky_alert(msg_text: string, footer_text: string = "")
       Alert that re-loops on itself indefinitely instead of advancing to
       the next queued message. After typing out the message, it holds
       for `message_hold_time`, clears the screen, holds for
@@ -790,6 +796,8 @@ namespace, key "state_json". Format:
     "q": ["chunk1", "chunk2", ...],   # source chunks (after :name: expansion)
     "g": [0, 1, 1, 0, ...],           # group ids (0=standalone, >0=split-group)
     "a": [0, 1, 1, 0, ...],           # alert flags (parallel to q)
+    "s": [0, 0, 0, 1, ...],           # sticky flags (parallel to q)
+    "f": ["", "", "CPU: 42%", ""],    # footer overrides (parallel to q; "" = use x/N)
     "n": 7                            # next_group_id counter
   }
 
@@ -863,6 +871,10 @@ def main() -> int:
     p.add_argument("--sticky", action="store_true",
                    help="Sticky alert: pins the cycle on this message until "
                         "it's cleared via --clear or --clear <N>. Implies --alert.")
+    p.add_argument("--footer", metavar="TEXT", default="",
+                   help="Override the bottom-centre x/N footer with this "
+                        "string for the message being sent. Empty (default) "
+                        "keeps the x/N counter.")
     p.add_argument("--skip", action="store_true",
                    help="Call the 'skip' action to advance to next message")
     p.add_argument("--clear", nargs="*", metavar="N", default=None,
@@ -996,9 +1008,11 @@ def main() -> int:
         action = "add_alert"
     else:
         action = "add_message"
-    print(f"{action} ({len(msg)} chars): {msg[:60]}"
+    footer_note = f" footer={args.footer!r}" if args.footer else ""
+    print(f"{action} ({len(msg)} chars{footer_note}): {msg[:60]}"
           f"{'...' if len(msg) > 60 else ''}", file=sys.stderr)
-    return asyncio.run(call(action, {"message": msg}))
+    return asyncio.run(call(action, {"msg_text": msg,
+                                     "footer_text": args.footer}))
 
 
 if __name__ == "__main__":

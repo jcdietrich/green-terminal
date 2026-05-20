@@ -4,13 +4,14 @@
 // The on-flash format is a JSON object stored in ESP-IDF NVS under
 // "term/state_json":
 //   {"q":["chunk1","chunk2",...],"g":[0,1,1,0,...],"a":[0,1,1,0,...],
-//    "s":[0,0,1,0,...],"n":<next_group_id>}
+//    "s":[0,0,1,0,...],"f":["footer1","footer2",...],"n":<next_group_id>}
 //
 // `q` is the chunk list, `g` is a parallel list of group ids
 // (0 = standalone single-chunk message; >0 = id shared by all chunks of
 // a long split message), `a` is a parallel list of alert flags (0/1),
 // `s` is a parallel list of sticky flags (0/1) — sticky chunks hold the
-// cycle in PAUSE_AFTER until they're dismissed — and `n` is the counter
+// cycle in PAUSE_AFTER until they're dismissed — `f` is a parallel list
+// of footer override strings, and `n` is the counter
 // used to allocate the next group id.
 
 #include <algorithm>
@@ -75,10 +76,12 @@ inline std::string serialize_state(const std::vector<std::string> &chunks,
                                    const std::vector<int> &groups,
                                    const std::vector<int> &alerts,
                                    const std::vector<int> &sticky,
+                                   const std::vector<std::string> &footers,
                                    int next_group_id) {
   std::string out;
   out.reserve(chunks.size() * 32 + groups.size() * 4 +
-              alerts.size() * 2 + sticky.size() * 2 + 32);
+              alerts.size() * 2 + sticky.size() * 2 + 
+              footers.size() * 16 + 32);
   out += "{\"q\":[";
   for (size_t i = 0; i < chunks.size(); i++) {
     if (i) out += ',';
@@ -100,6 +103,11 @@ inline std::string serialize_state(const std::vector<std::string> &chunks,
   for (size_t i = 0; i < sticky.size(); i++) {
     if (i) out += ',';
     out += sticky[i] ? '1' : '0';
+  }
+  out += "],\"f\":[";
+  for (size_t i = 0; i < footers.size(); i++) {
+    if (i) out += ',';
+    out += serialize_string(footers[i]);
   }
   out += "],\"n\":";
   char buf[12];
@@ -207,8 +215,9 @@ inline bool save_state(const std::vector<std::string> &chunks,
                        const std::vector<int> &groups,
                        const std::vector<int> &alerts,
                        const std::vector<int> &sticky,
+                       const std::vector<std::string> &footers,
                        int next_group_id) {
-  std::string json = serialize_state(chunks, groups, alerts, sticky,
+  std::string json = serialize_state(chunks, groups, alerts, sticky, footers,
                                      next_group_id);
   nvs_handle_t h;
   esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
@@ -232,11 +241,13 @@ inline bool load_state(std::vector<std::string> &chunks,
                        std::vector<int> &groups,
                        std::vector<int> &alerts,
                        std::vector<int> &sticky,
+                       std::vector<std::string> &footers,
                        int &next_group_id) {
   chunks.clear();
   groups.clear();
   alerts.clear();
   sticky.clear();
+  footers.clear();
   next_group_id = 1;
 
   nvs_handle_t h;
@@ -277,6 +288,8 @@ inline bool load_state(std::vector<std::string> &chunks,
   if (apos != std::string::npos) alerts = parse_ints(json, apos);
   size_t spos = find_field(json, "s");
   if (spos != std::string::npos) sticky = parse_ints(json, spos);
+  size_t fpos = find_field(json, "f");
+  if (fpos != std::string::npos) footers = parse_strings(json, fpos);
   size_t npos = find_field(json, "n");
   if (npos != std::string::npos) {
     size_t tmp = npos;
@@ -289,6 +302,8 @@ inline bool load_state(std::vector<std::string> &chunks,
   if (alerts.size() > chunks.size()) alerts.resize(chunks.size());
   while (sticky.size() < chunks.size()) sticky.push_back(0);
   if (sticky.size() > chunks.size()) sticky.resize(chunks.size());
+  while (footers.size() < chunks.size()) footers.push_back("");
+  if (footers.size() > chunks.size()) footers.resize(chunks.size());
   // Defensive: ensure next_group_id is past any persisted ids.
   for (int g : groups) {
     if (g >= next_group_id) next_group_id = g + 1;
@@ -462,9 +477,10 @@ inline std::vector<LineSeg> parse_blink_segments(const std::string &line) {
 // Remove all chunks of the front group. Returns count removed.
 // Keeps all parallel vectors in sync.
 inline int evict_oldest_group(std::vector<std::string> &chunks,
-                              std::vector<int> &groups,
-                              std::vector<int> &alerts,
-                              std::vector<int> &sticky) {
+                               std::vector<int> &groups,
+                               std::vector<int> &alerts,
+                               std::vector<int> &sticky,
+                               std::vector<std::string> &footers) {
   if (chunks.empty()) return 0;
   int g = groups.front();
   if (g == 0) {
@@ -472,6 +488,7 @@ inline int evict_oldest_group(std::vector<std::string> &chunks,
     groups.erase(groups.begin());
     if (!alerts.empty()) alerts.erase(alerts.begin());
     if (!sticky.empty()) sticky.erase(sticky.begin());
+    if (!footers.empty()) footers.erase(footers.begin());
     return 1;
   }
   int n = 0;
@@ -480,6 +497,7 @@ inline int evict_oldest_group(std::vector<std::string> &chunks,
     groups.erase(groups.begin());
     if (!alerts.empty()) alerts.erase(alerts.begin());
     if (!sticky.empty()) sticky.erase(sticky.begin());
+    if (!footers.empty()) footers.erase(footers.begin());
     n++;
   }
   return n;
@@ -504,6 +522,7 @@ inline int remove_group_at(std::vector<std::string> &chunks,
                            std::vector<int> &groups,
                            std::vector<int> &alerts,
                            std::vector<int> &sticky,
+                           std::vector<std::string> &footers,
                            int group_pos_1based) {
   int start = find_group_start(groups, group_pos_1based);
   if (start < 0) return 0;
@@ -521,6 +540,10 @@ inline int remove_group_at(std::vector<std::string> &chunks,
     size_t send = std::min(end, sticky.size());
     sticky.erase(sticky.begin() + s, sticky.begin() + send);
   }
+  if (s < footers.size()) {
+    size_t fend = std::min(end, footers.size());
+    footers.erase(footers.begin() + s, footers.begin() + fend);
+  }
   return n;
 }
 
@@ -530,6 +553,7 @@ inline int clear_alert_chunks(std::vector<std::string> &chunks,
                               std::vector<int> &groups,
                               std::vector<int> &alerts,
                               std::vector<int> &sticky,
+                              std::vector<std::string> &footers,
                               int cur_idx) {
   size_t write = 0;
   int removed_before_cursor = 0;
@@ -543,6 +567,9 @@ inline int clear_alert_chunks(std::vector<std::string> &chunks,
         if (read < sticky.size() && write < sticky.size()) {
           sticky[write] = sticky[read];
         }
+        if (read < footers.size() && write < footers.size()) {
+          footers[write] = footers[read];
+        }
       }
       write++;
     } else if (static_cast<int>(read) <= cur_idx) {
@@ -553,6 +580,7 @@ inline int clear_alert_chunks(std::vector<std::string> &chunks,
   groups.resize(write);
   alerts.resize(write);
   if (sticky.size() > write) sticky.resize(write);
+  if (footers.size() > write) footers.resize(write);
   return removed_before_cursor;
 }
 
