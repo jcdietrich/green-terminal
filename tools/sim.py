@@ -790,7 +790,8 @@ def get_unique_path(path: Path) -> Path:
 # ───────────────────────── Encoder ─────────────────────────────────────────
 def encode_mp4(scenario: Scenario, out_path: Path,
                title: Optional[str] = None,
-               description: Optional[str] = None) -> None:
+               description: Optional[str] = None,
+               sound_path: Optional[str] = None) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n_frames = int(scenario.duration_ms / 1000.0 * scenario.fps)
     print(f"  rendering {n_frames} frames @ {scenario.fps} fps → {out_path.name}")
@@ -806,17 +807,25 @@ def encode_mp4(scenario: Scenario, out_path: Path,
         "-s", f"{target_w}x{target_h}",
         "-r", str(scenario.fps),
         "-i", "-",
-        "-an",
+    ]
+    if sound_path:
+        cmd.extend(["-stream_loop", "-1", "-i", str(sound_path)])
+        cmd.extend(["-c:a", "aac"])
+    else:
+        cmd.append("-an")
+    cmd.extend([
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-preset", "slow",
         "-crf", "20",
         "-movflags", "+faststart",
-    ]
+    ])
     if title:
         cmd.extend(["-metadata", f"title={title}"])
     if description:
         cmd.extend(["-metadata", f"description={description}"])
+    if sound_path:
+        cmd.append("-shortest")
     cmd.extend([
         "-f", "mp4",  # Force mp4 container even if extension is .mp3
         str(out_path),
@@ -954,6 +963,10 @@ def main() -> int:
     p.add_argument("--glow", type=int, help="Background phosphor glow intensity (0-255)")
     p.add_argument("--title", help="Title to embed in MP4 metadata")
     p.add_argument("--description", help="Description to embed in MP4 metadata")
+    p.add_argument("--file", metavar="PATH",
+                   help="Read message content from a text file")
+    p.add_argument("--sound", metavar="PATH",
+                   help="Path to an audio file to use as backing track (looped)")
     p.add_argument("--no-subtitles", action="store_true",
                    help="Skip generating a .vtt subtitle file alongside the MP4")
     args = p.parse_args()
@@ -965,9 +978,11 @@ def main() -> int:
         print(f"ERROR: font missing: {FONT_PATH}", file=sys.stderr)
         return 1
 
-    # Check for piped input
+    # Check for piped input or --file
     piped_text = None
-    if not sys.stdin.isatty():
+    if args.file:
+        piped_text = Path(args.file).read_text().strip()
+    elif not sys.stdin.isatty():
         piped_text = sys.stdin.read().strip()
 
     if args.list:
@@ -977,9 +992,10 @@ def main() -> int:
 
     targets: List[Scenario]
     if piped_text:
+        desc = f"Content from {args.file}" if args.file else "Piped input from stdin"
         targets = [Scenario(
             name="piped",
-            description="Piped input from stdin",
+            description=desc,
             segments=[Segment(piped_text, footer_override=args.footer)],
         )]
     elif args.all:
@@ -1013,7 +1029,7 @@ def main() -> int:
             filename += ".mp4"
 
         out_path = get_unique_path(OUT_DIR / filename)
-        encode_mp4(s, out_path, args.title, args.description)
+        encode_mp4(s, out_path, args.title, args.description, args.sound)
 
         if not args.no_subtitles:
             sub_entries = build_subtitles(s)
