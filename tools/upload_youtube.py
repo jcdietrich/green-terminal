@@ -289,19 +289,19 @@ def upload_captions(youtube, video_id: str, vtt_path: Path) -> bool:
         "snippet": {
             "videoId": video_id,
             "language": "en",
+            "name": "English",
             "isDraft": False,
         },
     }
-    }
-    media = MediaFileUpload(str(vtt_path), mimetype="text/vtt")
+    media = MediaFileUpload(str(vtt_path), mimetype="application/octet-stream")
     try:
         youtube.captions().insert(
-            body=body, media_body=media, part="snippet", sync=False
+            body=body, media_body=media, part="snippet"
         ).execute()
-        print(f"    captions ✓")
+        print(f"    captions \u2713")
         return True
     except Exception as exc:
-        print(f"    captions ✗ {exc}")
+        print(f"    captions \u2717 {exc}")
         return False
 
 
