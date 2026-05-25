@@ -5,3 +5,4 @@
 /secrets.yaml
 /.claude/
 __pycache__/
+/.venv/
