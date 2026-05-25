@@ -90,7 +90,10 @@ def _try_read_mp4_meta(mp4_path: Path, entry: VideoEntry) -> None:
         m = MP4File(str(mp4_path))
         if "\xa9nam" in m:
             entry.meta_title = str(m["\xa9nam"][0])
-        if "\xa9des" in m:
+        # ffmpeg writes "desc", not "\xa9des" — check both
+        if "desc" in m:
+            entry.meta_desc = str(m["desc"][0])
+        elif "\xa9des" in m:
             entry.meta_desc = str(m["\xa9des"][0])
     except Exception:
         pass  # mutagen unavailable or file lacks tags

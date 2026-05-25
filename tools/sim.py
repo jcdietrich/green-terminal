@@ -788,14 +788,16 @@ def get_unique_path(path: Path) -> Path:
 
 
 # ───────────────────────── Encoder ─────────────────────────────────────────
-def encode_mp4(scenario: Scenario, out_path: Path) -> None:
+def encode_mp4(scenario: Scenario, out_path: Path,
+               title: Optional[str] = None,
+               description: Optional[str] = None) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n_frames = int(scenario.duration_ms / 1000.0 * scenario.fps)
     print(f"  rendering {n_frames} frames @ {scenario.fps} fps → {out_path.name}")
 
     # ffmpeg command: read rgb24 frames from stdin, encode H.264 with yuv420p
     target_w, target_h = W * SCALE, H * SCALE
-    cmd = [
+    cmd: List[str] = [
         "ffmpeg",
         "-y",
         "-loglevel", "error",
@@ -810,9 +812,15 @@ def encode_mp4(scenario: Scenario, out_path: Path) -> None:
         "-preset", "slow",
         "-crf", "20",
         "-movflags", "+faststart",
+    ]
+    if title:
+        cmd.extend(["-metadata", f"title={title}"])
+    if description:
+        cmd.extend(["-metadata", f"description={description}"])
+    cmd.extend([
         "-f", "mp4",  # Force mp4 container even if extension is .mp3
         str(out_path),
-    ]
+    ])
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     assert proc.stdin is not None
 
@@ -944,6 +952,8 @@ def main() -> int:
                    help="Footer override for the piped/custom scenario "
                         "(replaces the x/N counter, same as send_msg.py --footer)")
     p.add_argument("--glow", type=int, help="Background phosphor glow intensity (0-255)")
+    p.add_argument("--title", help="Title to embed in MP4 metadata")
+    p.add_argument("--description", help="Description to embed in MP4 metadata")
     p.add_argument("--no-subtitles", action="store_true",
                    help="Skip generating a .vtt subtitle file alongside the MP4")
     args = p.parse_args()
@@ -1003,7 +1013,7 @@ def main() -> int:
             filename += ".mp4"
 
         out_path = get_unique_path(OUT_DIR / filename)
-        encode_mp4(s, out_path)
+        encode_mp4(s, out_path, args.title, args.description)
 
         if not args.no_subtitles:
             sub_entries = build_subtitles(s)
