@@ -787,6 +787,23 @@ def get_unique_path(path: Path) -> Path:
         num += 1
 
 
+
+def _format_title(title: str) -> str:
+    """Convert snake_case or camelCase to Title Case With Spaces.
+
+    Handles: "my_video" → "My Video", "myVideo" → "My Video"
+    Non-matching strings are returned unchanged.
+    """
+    words = title.split("_")
+    if len(words) > 1:
+        # Snake case
+        words = [w for w in words if w]
+    else:
+        # Camel case — insert space before uppercase after lowercase
+        spaced = re.sub(r"([a-z])([A-Z])", r"\1 \2", title)
+        words = spaced.split()
+    return " ".join(w.capitalize() for w in words)
+
 # ───────────────────────── Encoder ─────────────────────────────────────────
 def encode_mp4(scenario: Scenario, out_path: Path,
                title: Optional[str] = None,
@@ -821,7 +838,7 @@ def encode_mp4(scenario: Scenario, out_path: Path,
         "-movflags", "+faststart",
     ])
     if title:
-        cmd.extend(["-metadata", f"title={title}"])
+        cmd.extend(["-metadata", f"title={_format_title(title)}"])
     if description:
         cmd.extend(["-metadata", f"description={description}"])
     if sound_path:
