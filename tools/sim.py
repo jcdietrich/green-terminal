@@ -215,6 +215,14 @@ class Frame:
     rain: bool = False        # if True, render idle matrix rain instead
 
 
+@dataclass
+class SubtitleEntry:
+    """A single timed subtitle cue."""
+    start_ms: int
+    end_ms: int
+    text: str
+
+
 # ───────────────────────── Blink-alpha curve ───────────────────────────────
 def blink_alpha(t_ms: int) -> float:
     """Reproduce the device's 1000 ms cursor-blink cycle: 0..500 ON,
@@ -588,6 +596,39 @@ def _segment_phases(seg: Segment, t: Tunables, loops: int = 1) -> List[Tuple[str
     return out
 
 
+def build_subtitles(scenario: Scenario) -> List[SubtitleEntry]:
+    """Generate subtitle entries synchronized with the scenario timeline.
+
+    One entry per segment, timed from the start of the 'type' phase through
+    the end of the 'hold' phase. Sticky segments get one entry per loop.
+    Idle rain intro/outro produce no subtitles.
+    """
+    entries: List[SubtitleEntry] = []
+    now_ms = scenario.idle_intro_ms
+
+    for seg in scenario.segments:
+        loops = scenario.sticky_loops if seg.is_sticky else 1
+        phases = _segment_phases(seg, scenario.tunables, loops)
+        text = seg.text  # already shortcut-expanded
+
+        type_start: Optional[int] = None
+        for phase_name, dur in phases:
+            if phase_name == "type":
+                type_start = now_ms
+            elif phase_name == "hold" and type_start is not None:
+                entries.append(SubtitleEntry(
+                    start_ms=type_start,
+                    end_ms=now_ms + dur,
+                    text=text,
+                ))
+                type_start = None
+            elif phase_name in ("clear", "home"):
+                type_start = None
+            now_ms += dur
+
+    return entries
+
+
 def build_frame(scenario: Scenario, ms: int) -> Frame:
     """Resolve the scenario's state at absolute time `ms` into a Frame."""
     t = scenario.tunables
@@ -791,6 +832,25 @@ def encode_mp4(scenario: Scenario, out_path: Path) -> None:
     print(f"  ✓ {out_path.relative_to(REPO_ROOT)} ({out_path.stat().st_size // 1024} KiB)")
 
 
+def write_vtt(entries: List[SubtitleEntry], path: Path) -> None:
+    """Write subtitle entries as a WebVTT file.
+
+    YouTube accepts .vtt uploads directly through YouTube Studio.
+    """
+    def _fmt(ms: int) -> str:
+        h, r = divmod(ms, 3600000)
+        m, r = divmod(r, 60000)
+        s, ms = divmod(r, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("WEBVTT\n\n")
+        for i, e in enumerate(entries, 1):
+            f.write(f"{i}\n{_fmt(e.start_ms)} --> {_fmt(e.end_ms)}\n{e.text}\n\n")
+    print(f"  ✓ subtitles: {path.relative_to(REPO_ROOT)}")
+
+
 # ───────────────────────── Scenarios ───────────────────────────────────────
 def scenario_basic() -> Scenario:
     return Scenario(
@@ -884,6 +944,8 @@ def main() -> int:
                    help="Footer override for the piped/custom scenario "
                         "(replaces the x/N counter, same as send_msg.py --footer)")
     p.add_argument("--glow", type=int, help="Background phosphor glow intensity (0-255)")
+    p.add_argument("--no-subtitles", action="store_true",
+                   help="Skip generating a .vtt subtitle file alongside the MP4")
     args = p.parse_args()
 
     if not shutil.which("ffmpeg"):
@@ -942,6 +1004,12 @@ def main() -> int:
 
         out_path = get_unique_path(OUT_DIR / filename)
         encode_mp4(s, out_path)
+
+        if not args.no_subtitles:
+            sub_entries = build_subtitles(s)
+            if sub_entries:
+                vtt_path = out_path.with_suffix(".vtt")
+                write_vtt(sub_entries, vtt_path)
     return 0
 
 
