@@ -287,10 +287,11 @@ def upload_captions(youtube, video_id: str, vtt_path: Path) -> bool:
     """Upload *vtt_path* as YouTube captions for *video_id*. Returns bool."""
     body = {
         "snippet": {
+            "videoId": video_id,
             "language": "en",
-            "name": "",
             "isDraft": False,
         },
+    }
     }
     media = MediaFileUpload(str(vtt_path), mimetype="text/vtt")
     try:
