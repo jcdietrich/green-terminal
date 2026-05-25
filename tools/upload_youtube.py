@@ -265,6 +265,7 @@ def upload_video(youtube, video: VideoEntry) -> Optional[str]:
         },
         "status": {
             "privacyStatus": "public",
+            "selfDeclaredMadeForKids": False,
         },
     }
     media = MediaFileUpload(str(video.path), resumable=True)
