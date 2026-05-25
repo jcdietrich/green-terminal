@@ -43,7 +43,7 @@ SIM_PY = REPO_ROOT / "tools" / "sim.py"
 CONFIG_DIR = Path.home() / ".config" / "green-terminal"
 TOKEN_PATH = CONFIG_DIR / "youtube-oauth.pkl"
 CLIENT_SECRET_PATH = CONFIG_DIR / "client_secret.json"
-SCOPE = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPE = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 
 
 # ── Types ──────────────────────────────────────────────────────────────────
