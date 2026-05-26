@@ -20,6 +20,9 @@ and automatically refreshed on subsequent runs.
 Options:
     python tools/upload_youtube.py --no-auth    # dry-run: list + select only
     python tools/upload_youtube.py --dir /path  # scan a different directory
+
+Duplicates (matching title + description) are detected by scanning
+existing videos on the channel before uploading and are skipped.
 """
 
 import argparse
@@ -123,7 +126,7 @@ def parse_selection(text: str, max_index: int) -> List[int]:
         if not m:
             continue
         start = int(m.group(1)) - 1  # 1‑based → 0‑based
-        end = int(m.group(2)) if m.group(2) else start
+        end = int(m.group(2)) - 1 if m.group(2) else start
         indices.update(i for i in range(start, min(end, max_index - 1) + 1) if i >= 0)
     return sorted(indices)
 
@@ -252,6 +255,41 @@ def get_authenticated_service():
     return build("youtube", "v3", credentials=credentials)
 
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# Duplicate detection
+# ══════════════════════════════════════════════════════════════════════════
+
+def fetch_existing_videos(youtube) -> set:
+    """Return a set of (title, description) tuples for videos on the channel.
+
+    Handles pagination (up to 500 results, ~5 API calls).
+    """
+    existing: set = set()
+    next_page_token: Optional[str] = None
+    seen = 0
+    MAX_FETCH = 500
+
+    while seen < MAX_FETCH:
+        resp = youtube.search().list(
+            forMine=True,
+            part="snippet",
+            type="video",
+            maxResults=50,
+            pageToken=next_page_token,
+        ).execute()
+        for item in resp.get("items", []):
+            title = item["snippet"].get("title", "")
+            desc = item["snippet"].get("description", "")
+            existing.add((title, desc))
+            seen += 1
+        next_page_token = resp.get("nextPageToken")
+        if not next_page_token:
+            break
+
+    return existing
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # YouTube upload & captions
 # ══════════════════════════════════════════════════════════════════════════
@@ -350,7 +388,15 @@ def main() -> int:
     youtube = get_authenticated_service()
     print("  ✓ Authenticated")
 
+    print("Fetching existing videos from channel…")
+    existing = fetch_existing_videos(youtube)
+    print(f"  ✓ {len(existing)} existing videos found")
+
     for v in selected:
+        pair = (video_title(v), video_description(v))
+        if pair in existing:
+            print(f"  [{v.stem}] Duplicate (same title + description) — skipping")
+            continue
         print(f"\n[{v.stem}]")
         vid = upload_video(youtube, v)
         if vid and v.has_subtitles:

@@ -6,3 +6,5 @@
 /.claude/
 __pycache__/
 /.venv/
+.client_secret.json
+./docs/img/*
